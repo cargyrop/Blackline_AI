@@ -161,6 +161,16 @@
   }
   .assistant .msg-bubble strong { font-weight: 600; color: var(--text); }
 
+  /* Model label inside assistant message */
+  .assistant .msg-bubble .model-label {
+    display: block;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+  }
+
   .typing-dot {
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: var(--text-muted); margin: 0 2px; animation: blink 1.2s infinite;
@@ -820,11 +830,15 @@ function renderMessages(msgs) {
     return;
   }
   container.innerHTML = '';
-  for (const msg of msgs) appendMessage(msg.role, msg.content, false);
+  for (const msg of msgs) {
+    // Pass model info if available
+    const modelInfo = msg.model ? msg.model : null;
+    appendMessage(msg.role, msg.content, false, modelInfo);
+  }
   scrollBottom();
 }
 
-function appendMessage(role, content, animate = true) {
+function appendMessage(role, content, animate = true, model = null) {
   const container = document.getElementById('messages');
   const empty = document.getElementById('empty-state');
   if (empty) empty.remove();
@@ -832,9 +846,18 @@ function appendMessage(role, content, animate = true) {
   const div = document.createElement('div');
   div.className = `message ${role}`;
   const avatar = role === 'user' ? '👤' : '✦';
+  let bubbleContent = role === 'assistant' ? formatMd(content) : escHtml(content);
+
+  // Append model label to assistant messages if model info is present
+  if (role === 'assistant' && model) {
+    const modelName = model.name || model.id || 'Unknown model';
+    const providerIcon = model.icon || '';
+    bubbleContent += `<span class="model-label">${providerIcon} ${escHtml(modelName)}</span>`;
+  }
+
   div.innerHTML = `
     <div class="msg-avatar">${avatar}</div>
-    <div class="msg-bubble">${role === 'assistant' ? formatMd(content) : escHtml(content)}</div>`;
+    <div class="msg-bubble">${bubbleContent}</div>`;
   container.appendChild(div);
   if (animate) scrollBottom();
   return div;
@@ -945,8 +968,20 @@ async function sendMessage() {
 
   typingDiv.removeAttribute('id');
   if (assistantText) {
-    conv.messages.push({ role: 'assistant', content: assistantText });
+    // Store model info with the message
+    const modelInfo = { ...currentModel };
+    // Also add icon from models array
+    const modelObj = models.find(m => m.id === currentModel.id && m.provider === currentModel.provider);
+    if (modelObj) {
+      modelInfo.icon = modelObj.icon || '';
+      modelInfo.name = modelObj.name || modelObj.id;
+    }
+    conv.messages.push({ role: 'assistant', content: assistantText, model: modelInfo });
     saveConversations();
+    // Re-render just this message with model info
+    // Replace the temporary typing bubble with a proper message
+    const newBubble = appendMessage('assistant', assistantText, false, modelInfo);
+    typingDiv.replaceWith(newBubble);
   } else if (streamError) {
     conv.messages.push({ role: 'assistant', content: '[Error: ' + streamError + ']' });
     saveConversations();
