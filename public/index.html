@@ -385,6 +385,102 @@
     margin: 0; border: none; border-radius: 0; padding: 12px; overflow-x: auto;
   }
 
+  /* ── Update Prompt special block ──────────────────────────────────────── */
+  .update-prompt-block {
+    background: linear-gradient(135deg, rgba(99,102,241,0.10), rgba(168,85,247,0.10));
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    margin: 12px 0;
+    overflow: hidden;
+    box-shadow: 0 2px 12px rgba(99,102,241,0.15);
+  }
+  .update-prompt-header {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    color: white;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .update-prompt-icon { font-size: 16px; }
+  .update-prompt-title { font-weight: 700; letter-spacing: 0.2px; }
+  .update-prompt-hint { font-size: 11px; font-weight: 400; opacity: 0.85; margin-left: auto; }
+  .update-prompt-body {
+    margin: 0;
+    padding: 14px 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    max-height: 280px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+  }
+  .update-prompt-actions {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--surface2);
+    border-top: 1px solid var(--border);
+    justify-content: flex-end;
+  }
+  .update-prompt-actions button {
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  /* ── System Prompt modal: app-context row ─────────────────────────────── */
+  .modal-checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .modal-checkbox-row:hover { border-color: var(--accent); }
+  .modal-checkbox-row input[type="checkbox"] {
+    margin-top: 2px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .modal-checkbox-row .modal-checkbox-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    display: block;
+    margin-bottom: 2px;
+  }
+  .modal-checkbox-row .modal-checkbox-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+  .app-context-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--accent2);
+    background: rgba(99,102,241,0.10);
+    border: 1px solid var(--accent);
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    font-weight: 600;
+  }
+
   /* ── Deep Thinking & Live Execution Actions Component ─────────────────── */
   .action-ticker {
     background: var(--surface2); border: 1px solid var(--border); color: var(--accent2);
@@ -617,6 +713,13 @@
     <h3>⚙ System Prompt</h3>
     <p>Sets the AI's persona or instructions for this conversation. Applied to new conversations.</p>
     <textarea id="system-prompt-input" placeholder="You are a helpful assistant..."></textarea>
+    <label class="modal-checkbox-row" for="app-context-cb">
+      <input type="checkbox" id="app-context-cb" />
+      <div>
+        <span class="modal-checkbox-label">📚 Include app context (manifest)</span>
+        <span class="modal-checkbox-hint">Appends a structured description of this app to the system prompt so the model can answer "is X possible?", recommend features, audit itself, and produce optimized copy-pasteable Update prompts. Recommended when planning new features.</span>
+      </div>
+    </label>
     <div class="modal-btns">
       <button class="btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn-primary" onclick="saveSystemPrompt()">Save</button>
@@ -635,6 +738,9 @@ let conversations = loadStoredJson('conversations', []);
 if (!Array.isArray(conversations)) conversations = [];
 let currentConvId = null;
 let systemPrompt = localStorage.getItem('systemPrompt') || '';
+let appContextEnabled = localStorage.getItem('appContextEnabled') === 'true';
+let appManifest = null;             // cached GET /api/manifest response
+let appManifestString = '';         // pre-formatted string injected into system prompts
 let streaming = false;
 let activeAbortController = null;
 let deepThinkingEnabled = localStorage.getItem('deepThinkingEnabled') === 'true';
@@ -655,6 +761,18 @@ window.addEventListener('DOMContentLoaded', () => {
   buildKeysList();
   checkOllama();
   if (systemPrompt) document.getElementById('system-prompt-input').value = systemPrompt;
+
+  const appCtxCb = document.getElementById('app-context-cb');
+  if (appCtxCb) {
+    appCtxCb.checked = appContextEnabled;
+    appCtxCb.addEventListener('change', () => {
+      appContextEnabled = appCtxCb.checked;
+      localStorage.setItem('appContextEnabled', String(appContextEnabled));
+      toast(appContextEnabled ? 'App context ON — model knows the app 📚' : 'App context OFF', 'ok');
+    });
+  }
+
+  loadAppManifest();
 
   const thinkingCb = document.getElementById('enable-thinking-cb');
   if (thinkingCb) {
@@ -1149,6 +1267,11 @@ async function sendMessage() {
     const addCoT = "You are an analytical AI. Before providing your final polished response, you must conduct a thorough, real-time step-by-step Chain of Thought considerations and problem analysis. You MUST output your real-time internal calculations and considerations inside <think>...</think> tags. Once your internal considerations are complete, output your final response outside those tags.";
     dynamicSystemPrompt = dynamicSystemPrompt ? dynamicSystemPrompt + '\n\n' + addCoT : addCoT;
   }
+  if (appContextEnabled && appManifestString) {
+    dynamicSystemPrompt = dynamicSystemPrompt
+      ? dynamicSystemPrompt + '\n\n' + appManifestString
+      : appManifestString;
+  }
 
   try {
     const r = await fetch('/api/chat', {
@@ -1397,6 +1520,8 @@ function logMsg(type, text) {
 /* ── System prompt ──────────────────────────────────────────────────────────── */
 function openSystemModal() {
   document.getElementById('system-prompt-input').value = systemPrompt;
+  const cb = document.getElementById('app-context-cb');
+  if (cb) cb.checked = appContextEnabled;
   document.getElementById('modal-overlay').classList.add('open');
 }
 function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); }
@@ -1618,12 +1743,22 @@ async function apiErrorMessage(response, fallback) {
 }
 
 /* ── Markdown renderer (lightweight) ───────────────────────────────────────── */
+const _updatePromptMap = new Map();
+let _updatePromptIdCounter = 0;
+
 function formatMd(text) {
   let h = escHtml(text);
-  // Code blocks
+  // Code blocks — special-case update-prompt blocks with a copy/send widget
   h = h.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
     const cleanLang = escHtml(lang || 'code');
-    return `<div class="code-block"><div class="code-header"><span>${cleanLang}</span><button class="copy-code-btn" onclick="copyCode(this, event)">📋 Copy</button></div><pre><code>${code.trim()}</code></pre></div>`;
+    const cleanCode = code.trim();
+    if ((lang || '').toLowerCase() === 'update-prompt' || (lang || '').toLowerCase() === 'updateprompt') {
+      const escaped = escHtml(cleanCode);
+      const id = 'up-' + (++_updatePromptIdCounter);
+      _updatePromptMap.set(id, cleanCode);
+      return `<div class="update-prompt-block"><div class="update-prompt-header"><span class="update-prompt-icon">📋</span><span class="update-prompt-title">Optimized Update Prompt</span><span class="update-prompt-hint">Ready to paste into Update / Add Features</span></div><pre class="update-prompt-body"><code>${escaped}</code></pre><div class="update-prompt-actions"><button class="btn-secondary" onclick="copyUpdatePrompt('${id}', this, event)">📋 Copy to clipboard</button><button class="btn-primary" onclick="sendUpdatePrompt('${id}', this, event)">⚡ Send to Update panel</button></div></div>`;
+    }
+    return `<div class="code-block"><div class="code-header"><span>${cleanLang}</span><button class="copy-code-btn" onclick="copyCode(this, event)">📋 Copy</button></div><pre><code>${cleanCode}</code></pre></div>`;
   });
   // Inline code
   h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -1651,6 +1786,111 @@ function formatMd(text) {
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+/* ── App Manifest (injected into system prompt on demand) ───────────────────── */
+async function loadAppManifest() {
+  try {
+    const r = await fetch('/api/manifest');
+    if (!r.ok) throw new Error('manifest HTTP ' + r.status);
+    appManifest = await r.json();
+    appManifestString = renderManifestAsPrompt(appManifest);
+  } catch (e) {
+    console.warn('Could not load app manifest:', e.message);
+    appManifest = null;
+    appManifestString = '';
+  }
+}
+
+function renderManifestAsPrompt(m) {
+  if (!m) return '';
+  const lines = [];
+  lines.push('=== APP MANIFEST ===');
+  lines.push(`You are embedded inside the running app "${m.name}" (${m.description || ''}, v${m.version}).`);
+  lines.push('You have READ-ONLY awareness of the codebase via the structured manifest below.');
+  lines.push('Use it to: answer "is X possible?", recommend features, audit the design, and — once a feature is agreed — output a single fenced code block tagged ```update-prompt containing a polished, copy-pasteable feature request the user will paste into the Update / Add Features panel.');
+  lines.push('');
+  lines.push('--- TECH STACK ---');
+  (m.techStack || []).forEach(t => lines.push('• ' + t));
+  lines.push(`Port: ${m.port}`);
+  lines.push('');
+  lines.push('--- STORAGE ---');
+  if (m.storage) {
+    Object.entries(m.storage).forEach(([k, v]) => lines.push(`• ${k}: ${v}`));
+  }
+  lines.push('');
+  lines.push('--- FILES (line counts only) ---');
+  (m.files || []).forEach(f => lines.push(`• ${f.path}  (${f.lines} lines)`));
+  lines.push('');
+  lines.push('--- API ENDPOINTS ---');
+  (m.endpoints || []).forEach(e => lines.push(`• ${e.method} ${e.path}`));
+  lines.push('');
+  lines.push('--- FRONTEND ---');
+  if (m.frontend) {
+    lines.push(`Single file: public/index.html (~${m.frontend.lineCount} lines, contains HTML + inline CSS + inline JS).`);
+    lines.push(`Panels: ${(m.frontend.panels || []).join(', ')}`);
+    lines.push(`Key selectors: ${(m.frontend.keySelectors || []).join(', ')}`);
+    lines.push(`Notable JS functions: ${(m.frontend.functions || []).slice(0, 30).join(', ')}${(m.frontend.functions || []).length > 30 ? ' …' : ''}`);
+  }
+  lines.push('');
+  lines.push('--- CAPABILITIES (what this app can already do) ---');
+  (m.capabilities || []).forEach(c => lines.push('✓ ' + c));
+  lines.push('');
+  lines.push('--- HARD CONSTRAINTS ---');
+  (m.hardConstraints || []).forEach(c => lines.push('✗ ' + c));
+  lines.push('');
+  lines.push('--- HOW UPDATES WORK ---');
+  (m.updateWorkflow || []).forEach(s => lines.push(s));
+  lines.push('');
+  lines.push('--- HOW TO WRITE A GREAT UPDATE PROMPT ---');
+  if (m.updatePromptGuide) {
+    (m.updatePromptGuide.what_makes_a_great_prompt || []).forEach(t => lines.push('• ' + t));
+    lines.push('');
+    lines.push('Format convention: ' + (m.updatePromptGuide.format || ''));
+    lines.push('');
+    lines.push('Example of a great prompt:');
+    lines.push('```update-prompt');
+    lines.push(m.updatePromptGuide.example || '');
+    lines.push('```');
+  }
+  lines.push('');
+  lines.push('=== END APP MANIFEST ===');
+  return lines.join('\n');
+}
+
+/* ── Update Prompt block actions ───────────────────────────────────────────── */
+async function copyUpdatePrompt(id, btn, ev) {
+  if (ev) ev.stopPropagation();
+  const text = _updatePromptMap.get(id) || '';
+  if (!text) { toast('Prompt not found', 'err'); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.innerHTML;
+    btn.innerHTML = '✓ Copied!';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
+    toast('Prompt copied — paste it into Update / Add Features', 'ok');
+  } catch (err) {
+    toast('Copy failed: ' + err.message, 'err');
+  }
+}
+
+function sendUpdatePrompt(id, btn, ev) {
+  if (ev) ev.stopPropagation();
+  const text = _updatePromptMap.get(id) || '';
+  if (!text) { toast('Prompt not found', 'err'); return; }
+  showPanel('update');
+  const ta = document.getElementById('feature-input');
+  if (ta) {
+    ta.value = text;
+    ta.focus();
+    ta.scrollTop = 0;
+  }
+  const orig = btn.innerHTML;
+  btn.innerHTML = '✓ Sent!';
+  btn.style.color = 'var(--green)';
+  setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
+  toast('Prompt loaded into Update / Add Features — pick a model and click Apply', 'ok');
+}
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a0da4817ea4ad26e',t:'MTc4MTc4NTU3OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>

@@ -554,6 +554,100 @@ app.post('/api/chat', async (req, res) => {
   res.end();
 });
 
+// -- App Manifest (lets the chat model know what the app is) -------------------
+app.get('/api/manifest', (req, res) => {
+  try {
+    const appDir = __dirname;
+    const serverSrc = fs.readFileSync(path.join(appDir, 'server.js'), 'utf8');
+    const indexSrc  = fs.readFileSync(path.join(appDir, 'public', 'index.html'), 'utf8');
+    const pkg       = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
+
+    // Auto-derive file map (line counts only — no source content shipped)
+    const readFileMap = (dir, base = '') => {
+      const out = [];
+      for (const entry of fs.readdirSync(dir)) {
+        if (['node_modules', '.git', 'data', '.arena', '.cache', 'package-lock.json'].includes(entry)) continue;
+        const full = path.join(dir, entry);
+        const rel = path.join(base, entry);
+        if (fs.statSync(full).isDirectory()) out.push(...readFileMap(full, rel));
+        else out.push({ path: rel, lines: fs.readFileSync(full, 'utf8').split('\n').length });
+      }
+      return out;
+    };
+
+    // Auto-derive API routes
+    const endpoints = [...serverSrc.matchAll(/app\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/g)]
+      .map(m => ({ method: m[1].toUpperCase(), path: m[2] }));
+
+    // Auto-derive frontend panels (data-panel="...") and JS functions
+    const panels    = [...new Set([...indexSrc.matchAll(/data-panel="([^"${}]+)"/g)].map(m => m[1]))];
+    const functions = [...new Set([...indexSrc.matchAll(/function\s+(\w+)\s*\(/g)].map(m => m[1]))].sort();
+
+    res.json({
+      name: pkg.name,
+      description: pkg.description,
+      version: pkg.version,
+      techStack: ['Node.js + Express backend (single server.js)', 'vanilla HTML/CSS/JS frontend (single public/index.html)', 'no build step', 'Server-Sent Events for streaming chat and updates'],
+      port: 3737,
+      storage: {
+        apiKeys: 'data/config.json (local disk, never sent anywhere except the provider APIs)',
+        conversations: 'browser localStorage (per-device)',
+        backups: 'a sibling folder like ../ai-chat-app-backup-<timestamp>/ created automatically before every update'
+      },
+      files: readFileMap(appDir),
+      endpoints,
+      frontend: {
+        panels,
+        functions,
+        lineCount: indexSrc.split('\n').length,
+        keySelectors: ['#messages', '#feature-input', '#update-log', '#system-prompt-input', '#model-select', '#update-model-select', '#keys-list']
+      },
+      capabilities: [
+        'Rewrite server.js and/or public/index.html automatically via the /api/update endpoint (the "Update / Add Features" panel).',
+        'Add new UI panels, sidebar buttons, settings, modals, toasts.',
+        'Add new API endpoints (express routes), modify existing ones.',
+        'Change CSS / theme variables (--accent, --bg, etc. are CSS custom properties at the top of <style>).',
+        'Use the existing markdown renderer (formatMd) — code blocks render with a Copy button.',
+        'Persist small client state via localStorage (already used for conversations, systemPrompt, deepThinkingEnabled).',
+        'Stream both chat responses and update progress via Server-Sent Events.'
+      ],
+      hardConstraints: [
+        'Cannot add new npm dependencies automatically. If you need one, the user must run `npm install <pkg>` themselves; after that the app can require() it.',
+        'Cannot run shell commands or arbitrary code — only writes files inside the app folder.',
+        'Files outside the app folder are rejected (safeResolve blocks path traversal).',
+        'node_modules, .git, and data/ folders cannot be modified or created.',
+        'The update endpoint rewrites whole files (not diffs) — every changed file must be sent back in full.',
+        'There is only ONE frontend file (public/index.html) — HTML, CSS and JS all live there. Any frontend change goes in that one file.'
+      ],
+      updateWorkflow: [
+        '1. User types a feature description into the Update / Add Features textarea and clicks Apply Update.',
+        '2. Server creates a timestamped backup of the whole app at ../<name>-backup-<timestamp>/ (excluding node_modules, .git, data).',
+        '3. Server reads every source file and concatenates them into one big prompt.',
+        '4. Server sends that prompt + the feature request to the chosen "evolution" model (Anthropic / OpenAI / Gemini / Groq / OpenRouter / DeepSeek / Ollama).',
+        '5. The model returns a JSON array of {path, content} entries (full file rewrites).',
+        '6. Server validates each path (safeResolve), creates directories as needed, and writes the files to disk.',
+        '7. User reloads the browser tab. If server.js changed, the user restarts the Node process to pick up backend changes.'
+      ],
+      updatePromptGuide: {
+        what_makes_a_great_prompt: [
+          'State ONE clear feature (not three at once).',
+          'Describe visible user behavior, not low-level implementation when possible.',
+          'List exactly which files should change (server.js, public/index.html, both, or new file).',
+          'Specify UI placement: "in the chat header next to the existing buttons", "as a new sidebar nav item", etc.',
+          'Mention constraints: "preserve existing functionality", "follow existing CSS variable names", "do not add new dependencies".',
+          'If multiple providers/models are involved, specify each one\'s role.',
+          'Be concrete about edge cases: empty input, long text, streaming already in progress, etc.',
+          'Avoid vague verbs ("improve", "optimize") — replace with measurable behavior ("reduce time to first token by streaming headers earlier").'
+        ],
+        format: 'When the user agrees on a feature, your FINAL reply should end with EXACTLY one fenced code block tagged ```update-prompt (language hint) containing the polished prompt text. The frontend will detect this block and show a Copy / Send-to-Update-panel button.',
+        example: 'Add a "Rename conversation" action to each item in the left sidebar conversation list.\n\nUI behavior:\n- Right-clicking (or hovering + clicking a small pencil icon) a conversation item opens a small inline text input pre-filled with the current title.\n- Pressing Enter saves the new title and updates localStorage.\n- Pressing Escape cancels.\n- Empty titles are rejected.\n\nFiles to change: public/index.html only (single-file architecture — no new files).\nConstraints: preserve all existing chat, settings, and update-panel behavior; reuse the existing CSS variables (--accent, --surface2, etc.); do not add new dependencies.'
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // -- Self-update (with live real-time SSE feedback) ----------------------------
 app.post('/api/update', async (req, res) => {
   const { featureRequest, provider, model } = req.body;

@@ -1,0 +1,1 @@
+$(cat public/js/chat.js)
