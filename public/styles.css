@@ -1,0 +1,7 @@
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: Arial, sans-serif; }
+header { background-color: #3498db; color: white; text-align: center; padding: 1em 0; }
+div#chat-container { height: calc(100vh - 120px); overflow-y: auto; margin-top: 20px; border-radius: 5px; background-color: #f8f9fa; }
+footer { background-color: #3498db; color: white; text-align: center; padding: 1em 0; position: fixed; bottom: 0; width: 100%; }
+input[type="text"] { width: calc(100% - 60px); padding: 10px; margin-right: 10px; border: none; border-radius: 5px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+button { background-color: #3498db; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+button:hover { background-color: #2980b9; }

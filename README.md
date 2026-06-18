@@ -48,18 +48,21 @@ Popular local models:
 
 ---
 
-## ⚡ Adding New Features
+## 🧬 Evolving the App
 
-1. Go to **Update / Add Features** in the sidebar
-2. Describe what you want (e.g. "Add a button to copy messages to clipboard")
-3. Click **Apply Update**
+1. Go to **🧬 Evolve App** in the sidebar
+2. Select a capable AI model and start a conversation about what you want
+3. The AI will analyze the codebase, discuss feasibility, and propose a structured plan directly in the chat
+4. Review the plan — it will show each file action (create, edit, or delete) with an inline **Approve & Execute** button
+5. Click **Approve & Execute** to confirm, or simply type **"proceed"**, **"do it"**, **"yes"**, or **"execute"** — the system will automatically run the plan
+6. Watch the live feed in the chat — you will see the code being written file by file in real time
 
 The app automatically:
-- Creates a timestamped backup folder next to the app folder
-- Uses Claude (Anthropic key required) to generate the code changes
-- Applies them instantly
+- Creates a timestamped backup folder next to the app folder before any changes
+- Validates all file paths before writing
+- Writes files to disk as the AI generates them, while streaming the live output to you
 
-Reload the page after updating to see changes.
+Reload the page after updating to see changes. If `server.js` changed, restart the Node process.
 
 ---
 

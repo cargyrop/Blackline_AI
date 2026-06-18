@@ -603,7 +603,10 @@ app.get('/api/manifest', (req, res) => {
         keySelectors: ['#messages', '#feature-input', '#update-log', '#system-prompt-input', '#model-select', '#update-model-select', '#keys-list']
       },
       capabilities: [
-        'Rewrite server.js and/or public/index.html automatically via the /api/update endpoint (the "Update / Add Features" panel).',
+        'Evolve server.js and any frontend/backend file via the Evolve App panel (guided planning + preview + approval workflow).',
+        'Create new files anywhere in the app folder (except blocked directories).',
+        'Edit existing files using search/replace diffs (preferred) or full rewrites when necessary.',
+        'Delete existing files.',
         'Add new UI panels, sidebar buttons, settings, modals, toasts.',
         'Add new API endpoints (express routes), modify existing ones.',
         'Change CSS / theme variables (--accent, --bg, etc. are CSS custom properties at the top of <style>).',
@@ -615,17 +618,15 @@ app.get('/api/manifest', (req, res) => {
         'Cannot add new npm dependencies automatically. If you need one, the user must run `npm install <pkg>` themselves; after that the app can require() it.',
         'Cannot run shell commands or arbitrary code — only writes files inside the app folder.',
         'Files outside the app folder are rejected (safeResolve blocks path traversal).',
-        'node_modules, .git, and data/ folders cannot be modified or created.',
-        'The update endpoint rewrites whole files (not diffs) — every changed file must be sent back in full.',
-        'There is only ONE frontend file (public/index.html) — HTML, CSS and JS all live there. Any frontend change goes in that one file.'
+        'node_modules, .git, and data/ folders cannot be modified or created.'
       ],
       updateWorkflow: [
-        '1. User types a feature description into the Update / Add Features textarea and clicks Apply Update.',
-        '2. Server creates a timestamped backup of the whole app at ../<name>-backup-<timestamp>/ (excluding node_modules, .git, data).',
-        '3. Server reads every source file and concatenates them into one big prompt.',
-        '4. Server sends that prompt + the feature request to the chosen "evolution" model (Anthropic / OpenAI / Gemini / Groq / OpenRouter / DeepSeek / Ollama).',
-        '5. The model returns a JSON array of {path, content} entries (full file rewrites).',
-        '6. Server validates each path (safeResolve), creates directories as needed, and writes the files to disk.',
+        '1. User opens the Evolve App panel, selects a capable model, and asks a question or describes a desired change.',
+        '2. The Evolve AI (chat inside the panel) discusses the request, analyzes feasibility, and can propose a structured plan using a `plan` JSON block.',
+        '3. The user reviews the proposed plan directly in the chat and clicks "Approve & Execute" to confirm.',
+        '4. The server creates a timestamped backup, then calls the AI to generate the actual code for each file in the plan.',
+        '5. The server streams the live code generation back to the client in real-time. The user sees exactly which file is being written and what code is being generated.',
+        '6. The server writes each file to disk as it is generated.',
         '7. User reloads the browser tab. If server.js changed, the user restarts the Node process to pick up backend changes.'
       ],
       updatePromptGuide: {
@@ -639,8 +640,8 @@ app.get('/api/manifest', (req, res) => {
           'Be concrete about edge cases: empty input, long text, streaming already in progress, etc.',
           'Avoid vague verbs ("improve", "optimize") — replace with measurable behavior ("reduce time to first token by streaming headers earlier").'
         ],
-        format: 'When the user agrees on a feature, your FINAL reply should end with EXACTLY one fenced code block tagged ```update-prompt (language hint) containing the polished prompt text. The frontend will detect this block and show a Copy / Send-to-Update-panel button.',
-        example: 'Add a "Rename conversation" action to each item in the left sidebar conversation list.\n\nUI behavior:\n- Right-clicking (or hovering + clicking a small pencil icon) a conversation item opens a small inline text input pre-filled with the current title.\n- Pressing Enter saves the new title and updates localStorage.\n- Pressing Escape cancels.\n- Empty titles are rejected.\n\nFiles to change: public/index.html only (single-file architecture — no new files).\nConstraints: preserve all existing chat, settings, and update-panel behavior; reuse the existing CSS variables (--accent, --surface2, etc.); do not add new dependencies.'
+        format: 'When the user agrees on a feature, your FINAL reply should end with EXACTLY one fenced code block tagged ```plan containing a JSON array of proposed actions. The frontend will detect this block and render an inline Approve & Execute button.',
+        example: 'Add a "Rename conversation" action to each item in the left sidebar conversation list.\n\nUI behavior:\n- Right-clicking (or hovering + clicking a small pencil icon) a conversation item opens a small inline text input pre-filled with the current title.\n- Pressing Enter saves the new title and updates localStorage.\n- Pressing Escape cancels.\n- Empty titles are rejected.\n\nFiles to change: public/index.html (or create new files as needed).\nConstraints: preserve all existing chat, settings, and update-panel behavior; reuse the existing CSS variables (--accent, --surface2, etc.); do not add new dependencies.'
       }
     });
   } catch (err) {
@@ -944,6 +945,654 @@ OUTPUT RULES:
       backupDir,
       message: `Successfully applied ${applied.length} file update(s)! Reload the page to see your evolved application.`
     });
+  } catch (err) {
+    send({ type: 'error', message: err.message });
+  }
+  res.end();
+});
+
+// -- File tree (full contents for Evolve App) --------------------------------
+app.get('/api/files', (req, res) => {
+  try {
+    const appDir = __dirname;
+    const readDir = (dir, base = '') => {
+      const results = [];
+      for (const entry of fs.readdirSync(dir)) {
+        if (['node_modules', '.git', 'data', '.arena', '.cache', 'package-lock.json', 'dist', 'build', 'coverage'].includes(entry)) continue;
+        const full = path.join(dir, entry);
+        const rel = path.join(base, entry);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) {
+          results.push({ path: rel, type: 'dir', children: readDir(full, rel) });
+        } else {
+          const content = fs.readFileSync(full, 'utf8');
+          results.push({ path: rel, type: 'file', content, lines: content.split('\n').length });
+        }
+      }
+      return results;
+    };
+    res.json(readDir(appDir));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -- Evolve Preview (plan -> code generation, no writes yet) -----------------
+app.post('/api/evolve/preview', async (req, res) => {
+  const { provider, model, plan } = req.body;
+  if (!provider || !model) return res.status(400).json({ error: 'provider and model required' });
+  if (!Array.isArray(plan) || plan.length === 0) return res.status(400).json({ error: 'plan must be a non-empty array of proposed patches' });
+
+  const cfg = loadConfig();
+  const keys = cfg.keys || {};
+  if (provider !== 'ollama' && !keys[provider]) {
+    return res.status(400).json({ error: `A valid ${provider} API key is required in Settings.` });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const notify = (msg) => send({ type: 'info', message: msg });
+
+  const appDir = __dirname;
+
+  const readDir = (dir, base = '') => {
+    const results = [];
+    for (const entry of fs.readdirSync(dir)) {
+      if (['node_modules', '.git', 'data'].includes(entry)) continue;
+      const full = path.join(dir, entry);
+      const rel = path.join(base, entry);
+      if (fs.statSync(full).isDirectory()) results.push(...readDir(full, rel));
+      else results.push({ path: rel, content: fs.readFileSync(full, 'utf8') });
+    }
+    return results;
+  };
+
+  let files;
+  try {
+    files = readDir(appDir);
+  } catch (e) {
+    send({ type: 'error', message: `Could not read app files: ${e.message}` });
+    return res.end();
+  }
+
+  const planText = plan.map((p, i) => `${i+1}. ${p.action || 'edit'} ${p.path}: ${p.description || ''}`).join('\n');
+  const filesDump = files.map(f => `=== FILE: ${f.path} ===\n${f.content}`).join('\n\n');
+
+  const prompt = `You are an expert Node.js / HTML / CSS / JS developer. You are given the full source code of a local AI chat application and a structured plan of changes agreed upon by the user and an AI architect.
+
+PLAN:
+${planText}
+
+CURRENT SOURCE CODE:
+${filesDump}
+
+OUTPUT RULES:
+- Respond ONLY with a valid JSON array, no markdown, no explanation.
+- Each element must have:
+  - "path": relative path from app root
+  - "action": one of "create", "edit", "delete"
+- For CREATE: include "content" with the full new file content.
+- For DELETE: no "content" needed.
+- For EDIT: prefer "changes" (an array of { "search": "exact text to find", "replace": "replacement text" }). The search text must be unique and include enough surrounding context (5-10 lines). If the file is small or completely rewritten, you may use "content" for a full rewrite instead.
+- Only include files that need to change or new files to create.
+- Preserve all existing functionality unless explicitly asked to remove something.
+- Use the same code style as the existing files.`;
+
+  let rawText = '';
+
+  try {
+    if (provider === 'anthropic') {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': keys.anthropic,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 8192,
+          stream: true,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+        signal: AbortSignal.timeout(180000),
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: `Anthropic API error: ${await readErrorMessage(r, 'Preview failed')}` });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.type === 'content_block_delta' && d.delta?.text) {
+              const txt = d.delta.text;
+              rawText += txt;
+              send({ type: 'progress', text: txt });
+            }
+          } catch { /* skip */ }
+        }
+      }
+
+    } else if (provider === 'openai' || provider === 'groq' || provider === 'openrouter' || provider === 'deepseek') {
+      const endpoints = {
+        openai:     'https://api.openai.com/v1/chat/completions',
+        groq:       'https://api.groq.com/openai/v1/chat/completions',
+        openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+        deepseek:   'https://api.deepseek.com/v1/chat/completions',
+      };
+      const r = await fetch(endpoints[provider], {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${keys[provider]}`,
+          'Content-Type': 'application/json',
+          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737' } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true
+        }),
+        signal: AbortSignal.timeout(180000),
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: `${provider} API error: ${await readErrorMessage(r, 'Preview failed')}` });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            const txt = d.choices?.[0]?.delta?.content;
+            if (txt) {
+              rawText += txt;
+              send({ type: 'progress', text: txt });
+            }
+          } catch { /* skip */ }
+        }
+      }
+
+    } else if (provider === 'gemini') {
+      const executeGeminiPreviewStream = async (targetModel) => {
+        let textResult = '';
+        const r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(targetModel)}:streamGenerateContent?key=${keys.gemini}&alt=sse`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            }),
+            signal: AbortSignal.timeout(180000)
+          }
+        );
+        if (!r.ok) {
+          const msg = await readErrorMessage(r, 'Gemini API error');
+          throw new Error(explainProviderError('gemini', msg));
+        }
+        for await (const chunk of r.body) {
+          const lines = Buffer.from(chunk).toString().split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const d = JSON.parse(line.slice(6));
+              const txt = d.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (txt) {
+                textResult += txt;
+                send({ type: 'progress', text: txt });
+              }
+            } catch { /* skip */ }
+          }
+        }
+        return textResult;
+      };
+
+      try {
+        rawText = await executeGeminiPreviewStream(model);
+      } catch (err) {
+        if (err.message.includes('high demand') || err.message.includes('overloaded') || err.message.includes('429') || err.message.includes('503') || err.message.includes('400')) {
+          notify(`⚠️ ${model} overloaded (${err.message}). Self-healing: retrying with stable gemini-1.5-flash...`);
+          rawText = await executeGeminiPreviewStream('gemini-1.5-flash');
+        } else {
+          throw err;
+        }
+      }
+
+    } else if (provider === 'ollama') {
+      const r = await fetch('http://localhost:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true
+        }),
+        signal: AbortSignal.timeout(180000)
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: 'Ollama local preview request failed' });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n').filter(Boolean);
+        for (const line of lines) {
+          try {
+            const d = JSON.parse(line);
+            if (d.message?.content) {
+              const txt = d.message.content;
+              rawText += txt;
+              send({ type: 'progress', text: txt });
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } else {
+      send({ type: 'error', message: `Unknown provider for preview: ${provider}` });
+      return res.end();
+    }
+
+    notify('Parsing generated code...');
+    function extractJsonArray(text) {
+      let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      const mdMatch = cleaned.match(/```json\s*(\[\s*\{[\s\S]*\}\s*\])\s*```/);
+      if (mdMatch) {
+        try {
+          const parsed = JSON.parse(mdMatch[1]);
+          if (Array.isArray(parsed)) return parsed;
+        } catch { /* skip */ }
+      }
+      const firstIdx = cleaned.indexOf('[');
+      const lastIdx = cleaned.lastIndexOf(']');
+      if (firstIdx !== -1 && lastIdx !== -1 && lastIdx >= firstIdx) {
+        const maybeJson = cleaned.slice(firstIdx, lastIdx + 1);
+        try {
+          const parsed = JSON.parse(maybeJson);
+          if (Array.isArray(parsed)) return parsed;
+        } catch { /* skip */ }
+      }
+      cleaned = cleaned.replace(/```json|```/gi, '').trim();
+      return JSON.parse(cleaned);
+    }
+
+    let patches;
+    try {
+      patches = extractJsonArray(rawText);
+    } catch {
+      send({ type: 'error', message: 'Could not parse JSON array of file patches from AI response.\nResponse text was:\n' + rawText });
+      return res.end();
+    }
+
+    if (!Array.isArray(patches)) {
+      send({ type: 'error', message: 'AI response parsed successfully but was not a JSON array' });
+      return res.end();
+    }
+
+    const validated = [];
+    for (const patch of patches) {
+      const target = safeResolve(appDir, patch.path);
+      if (!target) {
+        send({ type: 'error', message: `Unsafe patch path: ${patch?.path}` });
+        return res.end();
+      }
+      validated.push(patch);
+    }
+
+    send({ type: 'preview', patches: validated, message: `Preview ready: ${validated.length} file(s)` });
+  } catch (err) {
+    send({ type: 'error', message: err.message });
+  }
+  res.end();
+});
+
+// -- Evolve Apply (writes approved patches after preview) --------------------
+app.post('/api/evolve/apply', async (req, res) => {
+  const { patches } = req.body;
+  if (!Array.isArray(patches)) return res.status(400).json({ error: 'patches must be an array' });
+
+  const appDir = __dirname;
+  const parentDir = path.dirname(appDir);
+  const appName = path.basename(appDir);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(parentDir, `${appName}-backup-${timestamp}`);
+
+  try {
+    fs.cpSync(appDir, backupDir, {
+      recursive: true,
+      filter: (src) => {
+        const basename = path.basename(src);
+        return !['node_modules', '.git', 'data', '.arena', '.cache'].includes(basename);
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Backup failed: ' + err.message });
+  }
+
+  const applied = [];
+  for (const patch of patches) {
+    const target = safeResolve(appDir, patch.path);
+    if (!target) {
+      return res.status(400).json({ error: `Unsafe or invalid patch path: ${patch?.path}` });
+    }
+
+    const action = patch.action || 'edit';
+
+    if (action === 'delete') {
+      if (fs.existsSync(target)) {
+        fs.unlinkSync(target);
+      }
+      applied.push({ path: patch.path, action: 'delete' });
+    } else if (action === 'create') {
+      if (typeof patch.content !== 'string') {
+        return res.status(400).json({ error: `Create action requires content for ${patch.path}` });
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, patch.content, 'utf8');
+      applied.push({ path: patch.path, action: 'create' });
+    } else if (action === 'edit') {
+      if (!fs.existsSync(target)) {
+        return res.status(400).json({ error: `Cannot edit missing file: ${patch.path}` });
+      }
+      let content = fs.readFileSync(target, 'utf8');
+      if (Array.isArray(patch.changes)) {
+        for (const change of patch.changes) {
+          if (typeof change.search !== 'string' || typeof change.replace !== 'string') {
+            return res.status(400).json({ error: `Each change must have search and replace strings for ${patch.path}` });
+          }
+          if (!content.includes(change.search)) {
+            return res.status(400).json({ error: `Search block not found in ${patch.path}: "${change.search.slice(0, 60)}..."` });
+          }
+          content = content.replace(change.search, change.replace);
+        }
+      } else if (typeof patch.content === 'string') {
+        content = patch.content;
+      } else {
+        return res.status(400).json({ error: `Edit action requires "changes" or "content" for ${patch.path}` });
+      }
+      fs.writeFileSync(target, content, 'utf8');
+      applied.push({ path: patch.path, action: 'edit' });
+    } else {
+      return res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+  }
+
+  res.json({ applied, backupDir, message: `Successfully applied ${applied.length} file update(s)! Reload the page to see your evolved application.` });
+});
+
+// -- Evolve Execute (single-step: plan -> live code generation -> writes) ----
+app.post('/api/evolve/execute', async (req, res) => {
+  const { provider, model, plan } = req.body;
+  if (!provider || !model) return res.status(400).json({ error: 'provider and model required' });
+  if (!Array.isArray(plan) || plan.length === 0) return res.status(400).json({ error: 'plan must be a non-empty array' });
+
+  const cfg = loadConfig();
+  const keys = cfg.keys || {};
+  if (provider !== 'ollama' && !keys[provider]) {
+    return res.status(400).json({ error: `A valid ${provider} API key is required in Settings.` });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  const appDir = __dirname;
+  const parentDir = path.dirname(appDir);
+  const appName = path.basename(appDir);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(parentDir, `${appName}-backup-${timestamp}`);
+
+  // Backup
+  try {
+    fs.cpSync(appDir, backupDir, {
+      recursive: true,
+      filter: (src) => {
+        const basename = path.basename(src);
+        return !['node_modules', '.git', 'data', '.arena', '.cache'].includes(basename);
+      }
+    });
+    send({ type: 'backup', dir: backupDir });
+  } catch (err) {
+    send({ type: 'error', message: 'Backup failed: ' + err.message });
+    return res.end();
+  }
+
+  // Read current files for context
+  const readDir = (dir, base = '') => {
+    const results = [];
+    for (const entry of fs.readdirSync(dir)) {
+      if (['node_modules', '.git', 'data'].includes(entry)) continue;
+      const full = path.join(dir, entry);
+      const rel = path.join(base, entry);
+      if (fs.statSync(full).isDirectory()) results.push(...readDir(full, rel));
+      else results.push({ path: rel, content: fs.readFileSync(full, 'utf8') });
+    }
+    return results;
+  };
+
+  let files;
+  try {
+    files = readDir(appDir);
+  } catch (e) {
+    send({ type: 'error', message: `Could not read app files: ${e.message}` });
+    return res.end();
+  }
+
+  const planText = plan.map((p, i) => `${i+1}. ${p.action} ${p.path}: ${p.description}`).join('\n');
+  const filesDump = files.map(f => `=== FILE: ${f.path} ===\n${f.content}`).join('\n\n');
+
+  const prompt = `You are an expert Node.js / HTML / CSS / JS developer. Execute the following plan by outputting the complete content for each file.
+
+PLAN:
+${planText}
+
+CURRENT SOURCE CODE:
+${filesDump}
+
+OUTPUT RULES:
+- For each file in the plan, output exactly:
+  === FILE: relative/path ===
+  [complete new file content]
+- Do NOT wrap content in markdown code blocks.
+- Do NOT add explanations between files.
+- Preserve all existing functionality unless explicitly asked to change.
+- Use the same code style as existing files.`;
+
+  let rawText = '';
+
+  try {
+    const streamChunk = (text) => {
+      rawText += text;
+      send({ type: 'chunk', text });
+    };
+
+    if (provider === 'anthropic') {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': keys.anthropic,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 8192,
+          stream: true,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+        signal: AbortSignal.timeout(300000),
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: `Anthropic API error: ${await readErrorMessage(r, 'Execution failed')}` });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.type === 'content_block_delta' && d.delta?.text) {
+              streamChunk(d.delta.text);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } else if (provider === 'openai' || provider === 'groq' || provider === 'openrouter' || provider === 'deepseek') {
+      const endpoints = {
+        openai:     'https://api.openai.com/v1/chat/completions',
+        groq:       'https://api.groq.com/openai/v1/chat/completions',
+        openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+        deepseek:   'https://api.deepseek.com/v1/chat/completions',
+      };
+      const r = await fetch(endpoints[provider], {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${keys[provider]}`,
+          'Content-Type': 'application/json',
+          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737' } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true
+        }),
+        signal: AbortSignal.timeout(300000),
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: `${provider} API error: ${await readErrorMessage(r, 'Execution failed')}` });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            const txt = d.choices?.[0]?.delta?.content;
+            if (txt) {
+              streamChunk(txt);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } else if (provider === 'gemini') {
+      const executeGeminiStream = async (targetModel) => {
+        let textResult = '';
+        const r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(targetModel)}:streamGenerateContent?key=${keys.gemini}&alt=sse`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            }),
+            signal: AbortSignal.timeout(300000)
+          }
+        );
+        if (!r.ok) {
+          const msg = await readErrorMessage(r, 'Gemini API error');
+          throw new Error(explainProviderError('gemini', msg));
+        }
+        for await (const chunk of r.body) {
+          const lines = Buffer.from(chunk).toString().split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const d = JSON.parse(line.slice(6));
+              const txt = d.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (txt) {
+                textResult += txt;
+                streamChunk(txt);
+              }
+            } catch { /* skip */ }
+          }
+        }
+        return textResult;
+      };
+      try {
+        rawText = await executeGeminiStream(model);
+      } catch (err) {
+        if (err.message.includes('high demand') || err.message.includes('overloaded') || err.message.includes('429') || err.message.includes('503') || err.message.includes('400')) {
+          send({ type: 'info', message: `⚠️ ${model} overloaded. Retrying with gemini-1.5-flash...` });
+          rawText = await executeGeminiStream('gemini-1.5-flash');
+        } else {
+          throw err;
+        }
+      }
+    } else if (provider === 'ollama') {
+      const r = await fetch('http://localhost:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true
+        }),
+        signal: AbortSignal.timeout(300000)
+      });
+      if (!r.ok) {
+        send({ type: 'error', message: 'Ollama local execution request failed' });
+        return res.end();
+      }
+      for await (const chunk of r.body) {
+        const lines = Buffer.from(chunk).toString().split('\n').filter(Boolean);
+        for (const line of lines) {
+          try {
+            const d = JSON.parse(line);
+            if (d.message?.content) {
+              streamChunk(d.message.content);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } else {
+      send({ type: 'error', message: `Unknown provider for execution: ${provider}` });
+      return res.end();
+    }
+
+    // Parse and write files
+    const parts = rawText.split(/(?=^=== FILE: )/m);
+    const applied = [];
+    for (const part of parts) {
+      const m = /^=== FILE: (.+?) ===\n/.exec(part);
+      if (m) {
+        const filePath = m[1].trim();
+        let content = part.slice(m[0].length);
+        // Strip any trailing markdown code block wrappers
+        content = content.replace(/^```\w*\n/, '').replace(/\n```\w*\n?$/, '').trim();
+        
+        const target = safeResolve(appDir, filePath);
+        if (!target) {
+          send({ type: 'file_error', path: filePath, error: 'Unsafe path' });
+          continue;
+        }
+        
+        const action = plan.find(p => p.path === filePath)?.action || 'edit';
+        
+        if (action === 'delete') {
+          if (fs.existsSync(target)) {
+            fs.unlinkSync(target);
+          }
+          applied.push({ path: filePath, action: 'delete' });
+          send({ type: 'file_complete', path: filePath, action: 'delete' });
+        } else {
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, content, 'utf8');
+          applied.push({ path: filePath, action });
+          send({ type: 'file_complete', path: filePath, action });
+        }
+      }
+    }
+
+    send({ type: 'done', applied, backupDir, message: `Successfully applied ${applied.length} file update(s)! Reload the page to see your evolved application.` });
   } catch (err) {
     send({ type: 'error', message: err.message });
   }

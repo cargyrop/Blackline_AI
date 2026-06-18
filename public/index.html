@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>AI Chat</title>
+<title>FreedomAI</title>
 <style>
   /* ── Reset & base ─────────────────────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -269,40 +269,82 @@
   .status-dot.online { background: var(--green); }
   .status-dot.offline { background: var(--red); }
 
-  /* ── Update panel ─────────────────────────────────────────────────────── */
-  #update-panel { overflow-y: auto; padding: 24px; gap: 24px; }
-  .update-section {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 20px; display: flex; flex-direction: column; gap: 14px;
-  }
-  .update-section h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  #feature-input {
-    background: var(--surface2); border: 1px solid var(--border);
-    color: var(--text); padding: 12px; border-radius: var(--radius-sm);
-    font-size: 13px; font-family: var(--font); resize: vertical; min-height: 100px;
-    outline: none; line-height: 1.6; transition: border-color 0.15s;
-  }
-  #feature-input:focus { border-color: var(--accent); }
-  #feature-input::placeholder { color: var(--text-dim); }
-  #apply-update-btn {
-    background: var(--accent); color: white; border: none;
-    padding: 10px 20px; border-radius: var(--radius-sm); cursor: pointer;
-    font-size: 13px; font-weight: 500; transition: background 0.15s;
-    display: flex; align-items: center; gap: 8px; align-self: flex-start;
-  }
-  #apply-update-btn:hover { background: var(--accent2); }
-  #apply-update-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  #update-log {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: var(--radius-sm); padding: 12px;
-    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
-    min-height: 80px; max-height: 300px; overflow-y: auto; line-height: 1.6;
-    white-space: pre-wrap;
-  }
-  .log-ok { color: var(--green); }
-  .log-err { color: var(--red); }
-  .log-info { color: var(--accent2); }
-
+    /* ── Evolve App panel ─────────────────────────────────────────────────── */
+  #evolve-panel { display: none; flex-direction: row; overflow: hidden; }
+  #evolve-panel.visible { display: flex; }
+  .evolve-layout { display: flex; flex-direction: row; width: 100%; height: 100%; }
+  .evolve-left { width: 60%; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+  .evolve-right { width: 40%; display: flex; flex-direction: column; overflow-y: auto; background: var(--surface); }
+  .evolve-chat-header { padding: 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .evolve-chat-header h2 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .evolve-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; display: block; }
+  .evolve-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .evolve-msg { display: flex; gap: 10px; max-width: 100%; }
+  .evolve-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .evolve-msg.assistant { align-self: flex-start; }
+  .evolve-msg-bubble { padding: 8px 12px; border-radius: var(--radius); font-size: 13px; line-height: 1.5; max-width: 85%; }
+  .evolve-msg.user .evolve-msg-bubble { background: var(--accent); color: white; }
+  .evolve-msg.assistant .evolve-msg-bubble { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  .evolve-msg-bubble p { margin-bottom: 6px; }
+  .evolve-msg-bubble p:last-child { margin-bottom: 0; }
+  .evolve-msg-bubble code { background: var(--bg); padding: 2px 5px; border-radius: 4px; font-family: var(--font-mono); font-size: 12px; color: var(--accent2); }
+  .evolve-msg-bubble pre { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; overflow-x: auto; margin: 6px 0; }
+  .evolve-msg-bubble pre code { background: none; padding: 0; font-size: 12px; color: var(--text); }
+  .evolve-input-area { padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
+  .evolve-input-row { display: flex; gap: 8px; align-items: flex-end; }
+  #evolve-input { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: var(--radius); font-size: 13px; font-family: var(--font); resize: vertical; min-height: 60px; outline: none; line-height: 1.5; }
+  #evolve-input:focus { border-color: var(--accent); }
+  .evolve-send-btn { background: var(--accent); border: none; color: white; padding: 8px 16px; border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .evolve-send-btn:hover { background: var(--accent2); }
+  .evolve-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .evolve-model-bar { display: flex; gap: 8px; align-items: center; }
+  .evolve-model-bar label { font-size: 12px; color: var(--text-muted); }
+  #evolve-model-select { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: var(--radius-sm); font-size: 12px; outline: none; }
+  
+  .evolve-section { padding: 16px; border-bottom: 1px solid var(--border); }
+  .evolve-section h3 { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text); display: flex; align-items: center; gap: 6px; }
+  .evolve-file-tree { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 2px; }
+  .evolve-tree-item { padding: 3px 6px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: background 0.15s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .evolve-tree-item:hover { background: var(--surface2); color: var(--text); }
+  .evolve-tree-item.active { background: var(--surface2); color: var(--accent2); }
+  .evolve-tree-dir { font-weight: 600; color: var(--text); }
+  .evolve-tree-file { color: var(--text-muted); }
+  .evolve-tree-children { display: flex; flex-direction: column; }
+  
+  .evolve-file-viewer { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); max-height: 200px; overflow-y: auto; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin-top: 8px; }
+  
+  .evolve-pending-list { display: flex; flex-direction: column; gap: 6px; }
+  .evolve-pending-item { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+  .evolve-pending-item .evolve-pending-path { font-weight: 600; color: var(--accent2); font-family: var(--font-mono); font-size: 11px; }
+  .evolve-pending-item .evolve-pending-desc { color: var(--text-muted); }
+  .evolve-pending-item .evolve-pending-action { font-size: 11px; color: var(--yellow); text-transform: uppercase; font-weight: 600; }
+  .evolve-pending-empty { font-size: 12px; color: var(--text-dim); font-style: italic; }
+  
+  .evolve-actions { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .evolve-actions button { width: 100%; padding: 8px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; border: none; }
+  .evolve-btn-primary { background: var(--accent); color: white; }
+  .evolve-btn-primary:hover:not(:disabled) { background: var(--accent2); }
+  .evolve-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .evolve-btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .evolve-btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
+  .evolve-btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+  
+  .evolve-preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 200; display: none; align-items: center; justify-content: center; }
+  .evolve-preview-overlay.open { display: flex; }
+  .evolve-preview-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); width: 80vw; max-width: 900px; height: 80vh; display: flex; flex-direction: column; padding: 20px; }
+  .evolve-preview-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px; }
+  .evolve-preview-header h3 { font-size: 15px; font-weight: 600; }
+  .evolve-preview-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .evolve-preview-file { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .evolve-preview-file-header { background: var(--surface2); padding: 8px 12px; font-size: 12px; font-weight: 600; font-family: var(--font-mono); display: flex; justify-content: space-between; align-items: center; }
+  .evolve-preview-file-status { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+  .evolve-preview-file-body { padding: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); max-height: 300px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
+  .evolve-preview-btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
+  
+  .evolve-action-card { background: var(--surface2); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 10px; margin: 8px 0; }
+  .evolve-action-card-header { font-size: 12px; font-weight: 600; color: var(--accent2); margin-bottom: 4px; }
+  .evolve-action-card-body { font-size: 12px; color: var(--text-muted); }
+  
   .warning-box {
     background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3);
     border-radius: var(--radius-sm); padding: 12px; font-size: 12px;
@@ -555,7 +597,7 @@
     <div id="sidebar-header">
       <span class="logo">✦</span>
       <div>
-        <h1>AI Chat</h1>
+        <h1>FreedomAI</h1>
         <span>Multi-provider · Local models</span>
       </div>
     </div>
@@ -566,8 +608,8 @@
       <button class="nav-btn" data-panel="settings" onclick="showPanel('settings')">
         <span class="icon">🔑</span> API Keys & Models
       </button>
-      <button class="nav-btn" data-panel="update" onclick="showPanel('update')">
-        <span class="icon">⚡</span> Update / Add Features
+      <button class="nav-btn" data-panel="evolve" onclick="showPanel('evolve')">
+        <span class="icon">🧬</span> Evolve App
       </button>
     </nav>
     <div id="conversations">
@@ -666,46 +708,51 @@
       </div>
     </div>
 
-    <!-- Update panel -->
-    <div class="panel" id="update-panel">
-      <div class="update-section">
-        <h2>⚡ Add a Feature</h2>
-        <p style="font-size:12px;color:var(--text-muted)">Select a capable model and describe a feature to add. The app will back up all current files first, then generate and apply code changes automatically. Reload the page after updating.</p>
-        
-        <!-- Requirement notification box -->
-        <div class="warning-box" style="margin-bottom: 12px; line-height: 1.4;">
-          ⚠️ <strong>Requirement:</strong> Self-updating requires an advanced AI model with a large context window (&gt;30k tokens) and strong structured JSON coding capabilities.<br>
-          <span style="font-size: 11px; color: var(--text-dim);">Only able models are listed below. Unlock more models by adding API keys or Ollama local models in Settings.</span>
-        </div>
-
-        <!-- Update Model Selector -->
-        <div class="update-model-box" style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <label for="update-model-select" style="font-size: 13px; font-weight: 600; color: var(--text-color);">Active Evolution AI Model:</label>
-            <label style="font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;">
-              <input type="checkbox" id="show-all-update-models" onchange="populateUpdateModelSelect()"> Show all
-            </label>
+    <!-- Evolve panel -->
+    <div class="panel" id="evolve-panel">
+      <div class="evolve-layout">
+        <div class="evolve-left">
+          <div class="evolve-chat-header">
+            <h2>🧬 Evolve App</h2>
+            <span class="evolve-subtitle">Discuss the codebase, plan changes, and approve updates</span>
           </div>
-          <div style="display: flex; gap: 10px; align-items: center;">
-            <select id="update-model-select" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-surface); color: var(--text-color); font-size: 13px; cursor: pointer; outline: none;">
-              <option value="" style="background: #1e2030; color: #ffffff;">— Loading advanced AI models... —</option>
-            </select>
-          </div>
-          <div style="font-size: 11px; color: var(--text-dim); margin-top: 2px;">
-            Behind-the-scenes real-time streaming evolution enabled.
+          <div id="evolve-messages" class="evolve-messages"></div>
+          <div class="evolve-input-area">
+            <div class="evolve-model-bar">
+              <label>Model:</label>
+              <select id="evolve-model-select"></select>
+              <label style="font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;">
+                <input type="checkbox" id="show-all-evolve-models" onchange="populateEvolveModelSelect()"> Show all
+              </label>
+            </div>
+            <div class="evolve-input-row">
+              <textarea id="evolve-input" placeholder="Ask about the codebase or request a feature..."></textarea>
+              <button class="evolve-send-btn" onclick="sendEvolveMessage()">Send</button>
+            </div>
           </div>
         </div>
-
-        <textarea id="feature-input" placeholder="Example: Add a button to copy any message to clipboard. Add dark/light mode toggle. Add markdown rendering for code blocks with syntax highlighting."></textarea>
-        <button id="apply-update-btn" onclick="applyUpdate()">
-          <span>⚡</span> Apply Update
-        </button>
-        <div style="font-size:11px;color:var(--text-dim);">Backup folder: created next to this app's folder with a timestamp.</div>
-        <div id="update-log" style="display:none;"></div>
+        <div class="evolve-right">
+          <div class="evolve-section">
+            <h3>📁 Codebase</h3>
+            <div id="evolve-file-tree" class="evolve-file-tree"></div>
+            <div id="evolve-file-viewer" class="evolve-file-viewer" style="display:none;">
+              <div id="evolve-file-viewer-title" style="font-weight:600;margin-bottom:6px;color:var(--accent2);"></div>
+            </div>
+          </div>
+          <div class="evolve-section" style="flex:1;">
+            <h3>🚀 Execution Status</h3>
+            <div id="evolve-status" class="evolve-pending-list">
+              <div class="evolve-pending-empty">No active execution. Approve a plan from the chat to begin.</div>
+            </div>
+          </div>
+          <div class="evolve-actions">
+            <button class="evolve-btn-secondary" onclick="clearEvolveChat()">Clear Chat</button>
+            <button class="evolve-btn-secondary" onclick="clearEvolvePending()">Clear Status</button>
+          </div>
+        </div>
       </div>
+
     </div>
-  </div>
-</div>
 
 <!-- System prompt modal -->
 <div id="modal-overlay" onclick="closeModalOutside(event)">
@@ -773,6 +820,8 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   loadAppManifest();
+  populateEvolveModelSelect();
+  loadFileTree();
 
   const thinkingCb = document.getElementById('enable-thinking-cb');
   if (thinkingCb) {
@@ -783,6 +832,14 @@ window.addEventListener('DOMContentLoaded', () => {
       toast(deepThinkingEnabled ? 'Deep Thinking Enabled ⚡' : 'Deep Thinking Disabled', 'ok');
     };
   }
+
+  // Ctrl+Enter support
+  document.getElementById('msg-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
 
   if (conversations.length === 0) newConversation(false);
   else loadConversation(conversations[0].id);
@@ -818,7 +875,7 @@ function populateModelSelect() {
   const count = document.getElementById('model-count');
   sel.innerHTML = '';
 
-  populateUpdateModelSelect();
+  populateEvolveModelSelect();
 
   if (models.length === 0) {
     sel.innerHTML = '<option value="" style="background: #1e2030; color: #ffffff;">— Add an API key in Settings —</option>';
@@ -853,43 +910,6 @@ function populateModelSelect() {
   onModelChange();
 }
 
-function populateUpdateModelSelect() {
-  const sel = document.getElementById('update-model-select');
-  if (!sel) return;
-
-  const showAll = document.getElementById('show-all-update-models')?.checked;
-  const targetModels = showAll ? models : models.filter(m => m.updateCapable);
-  sel.innerHTML = '';
-
-  if (targetModels.length === 0) {
-    sel.innerHTML = '<option value="" style="background: #1e2030; color: #ffffff;">— No capable models available (Add keys in Settings) —</option>';
-    return;
-  }
-
-  const groups = {};
-  for (const m of targetModels) {
-    if (!groups[m.provider]) groups[m.provider] = [];
-    groups[m.provider].push(m);
-  }
-  for (const [prov, ms] of Object.entries(groups)) {
-    const og = document.createElement('optgroup');
-    og.label = providerLabel(prov);
-    og.style.background = '#11131d';
-    og.style.color = '#a5b4fc';
-    og.style.fontWeight = '700';
-    for (const m of ms) {
-      const opt = document.createElement('option');
-      opt.value = JSON.stringify({ id: m.id, provider: m.provider });
-      opt.textContent = `${m.icon || ''} ${m.name}${m.updateCapable ? '' : ' (⚠️ May struggle)'}`;
-      opt.style.background = '#1e2030';
-      opt.style.color = '#ffffff';
-      opt.style.padding = '6px';
-      opt.style.fontWeight = '600';
-      og.appendChild(opt);
-    }
-    sel.appendChild(og);
-  }
-}
 
 function providerLabel(p) {
   return { anthropic:'Anthropic', openai:'OpenAI', gemini:'Google Gemini', groq:'Groq', openrouter:'OpenRouter', deepseek:'DeepSeek', ollama:'Local (Ollama)' }[p] || p;
@@ -1421,42 +1441,365 @@ async function sendMessage() {
   activeAbortController = null;
 }
 
-/* ── Self-update ────────────────────────────────────────────────────────────── */
-async function applyUpdate() {
-  const req = document.getElementById('feature-input').value.trim();
-  if (!req) { toast('Please describe the feature', 'err'); return; }
+/* ── Evolve App ─────────────────────────────────────────────────────────────── */
+let evolveMessages = [];
+let evolvePendingPatches = [];
+let evolvePreviewPatches = null;
+let evolveStreaming = false;
+let evolveAbortController = null;
 
-  const updateSelVal = document.getElementById('update-model-select').value;
-  if (!updateSelVal) { toast('Please select an AI model to perform the update', 'err'); return; }
+const EVOLVE_SYSTEM_PROMPT = `You are the Evolve AI — an expert software architect and full-stack developer embedded inside the FreedomAI Chat app.
+You help the user understand, plan, and evolve this codebase.
+You have read-only awareness of the codebase via the structured manifest below.
 
-  let updateModel = null;
-  try { updateModel = JSON.parse(updateSelVal); } catch { /* ignore */ }
-  if (!updateModel || !updateModel.provider || !updateModel.id) {
-    toast('Invalid update model selected', 'err');
+RULES:
+1. Answer questions about the codebase clearly and concisely.
+2. When the user asks for a feature or change, first analyze feasibility. If it violates hard constraints (e.g., requires new npm packages, tries to modify node_modules/.git/data), say so clearly and refuse.
+3. You CAN create new files, edit existing files, and delete existing files. Do not refuse file creation.
+4. When you propose concrete file changes, output them inside a JSON code block tagged exactly as \`plan. Include an array of objects: { "path": "...", "action": "create|edit|delete", "description": "..." }. Do NOT include full file content in the plan.
+5. CRITICAL: After outputting a plan, STOP. The user will see an inline ✅ Approve & Execute button in the chat. Explicitly tell them to click it. Do NOT output another plan unless they ask for changes.
+6. If the user says "proceed", "do it", "make the edit", "execute", "go ahead", "yes", or similar approval phrases, and you have already proposed a plan, do NOT plan again. Tell them: "Your plan is ready. Click the ✅ Approve & Execute button above to execute it."
+7. If a task is impossible, explain why instead of guessing.`;
+
+function populateEvolveModelSelect() {
+  const sel = document.getElementById('evolve-model-select');
+  if (!sel) return;
+  const showAll = document.getElementById('show-all-evolve-models')?.checked;
+  const targetModels = showAll ? models : models.filter(m => m.updateCapable);
+  sel.innerHTML = '';
+  if (targetModels.length === 0) {
+    sel.innerHTML = '<option value="" style="background: #1e2030; color: #ffffff;">— No capable models available (Add keys in Settings) —</option>';
+    return;
+  }
+  const groups = {};
+  for (const m of targetModels) {
+    if (!groups[m.provider]) groups[m.provider] = [];
+    groups[m.provider].push(m);
+  }
+  for (const [prov, ms] of Object.entries(groups)) {
+    const og = document.createElement('optgroup');
+    og.label = providerLabel(prov);
+    og.style.background = '#11131d';
+    og.style.color = '#a5b4fc';
+    og.style.fontWeight = '700';
+    for (const m of ms) {
+      const opt = document.createElement('option');
+      opt.value = JSON.stringify({ id: m.id, provider: m.provider });
+      opt.textContent = `${m.icon || ''} ${m.name}${m.updateCapable ? '' : ' (⚠️ May struggle)'}`;
+      opt.style.background = '#1e2030';
+      opt.style.color = '#ffffff';
+      opt.style.padding = '6px';
+      opt.style.fontWeight = '600';
+      og.appendChild(opt);
+    }
+    sel.appendChild(og);
+  }
+}
+
+function getEvolveModel() {
+  const val = document.getElementById('evolve-model-select')?.value;
+  if (!val) return null;
+  try { return JSON.parse(val); } catch { return null; }
+}
+
+async function loadFileTree() {
+  const container = document.getElementById('evolve-file-tree');
+  if (!container) return;
+  container.innerHTML = '<div class="evolve-pending-empty">Loading...</div>';
+  try {
+    const r = await fetch('/api/files');
+    if (!r.ok) throw new Error('Failed to load file tree');
+    const tree = await r.json();
+    container.innerHTML = '';
+    renderFileTreeNodes(tree, container, 0);
+  } catch (e) {
+    container.innerHTML = `<div class="evolve-pending-empty" style="color:var(--red)">Error: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderFileTreeNodes(nodes, container, level) {
+  if (!Array.isArray(nodes)) return;
+  for (const node of nodes) {
+    const div = document.createElement('div');
+    div.className = 'evolve-tree-item';
+    div.style.paddingLeft = (level * 14 + 6) + 'px';
+    if (node.type === 'dir') {
+      div.className += ' evolve-tree-dir';
+      div.innerHTML = `<span>📁</span> <span>${escHtml(node.path)}</span>`;
+      const childContainer = document.createElement('div');
+      childContainer.className = 'evolve-tree-children';
+      childContainer.style.display = 'block';
+      div.onclick = (e) => {
+        e.stopPropagation();
+        childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
+      };
+      container.appendChild(div);
+      container.appendChild(childContainer);
+      renderFileTreeNodes(node.children, childContainer, level + 1);
+    } else {
+      div.className += ' evolve-tree-file';
+      div.innerHTML = `<span>📄</span> <span>${escHtml(node.path)}</span>`;
+      div.onclick = (e) => {
+        e.stopPropagation();
+        showFileViewer(node.path, node.content);
+        document.querySelectorAll('.evolve-tree-file').forEach(el => el.classList.remove('active'));
+        div.classList.add('active');
+      };
+      container.appendChild(div);
+    }
+  }
+}
+
+function showFileViewer(path, content) {
+  const viewer = document.getElementById('evolve-file-viewer');
+  const title = document.getElementById('evolve-file-viewer-title');
+  if (!viewer) return;
+  if (title) title.textContent = path;
+  viewer.textContent = content;
+  viewer.style.display = 'block';
+}
+
+function appendEvolveMessage(role, content) {
+  const container = document.getElementById('evolve-messages');
+  if (!container) return;
+  const div = document.createElement('div');
+  div.className = `evolve-msg ${role}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'evolve-msg-bubble';
+
+  let cleanContent = content;
+  let foundPlans = [];
+
+  // Extract and remove plan blocks from the rendered text so they don't show as raw JSON
+  if (role === 'assistant') {
+    const planRegex = /\n?\n?\`\`\`plan\s*([\s\S]*?)\`\`\`/g;
+    let match;
+    while ((match = planRegex.exec(content)) !== null) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        if (Array.isArray(parsed)) {
+          foundPlans.push(parsed);
+          cleanContent = cleanContent.replace(match[0], '');
+        }
+      } catch { /* ignore invalid */ }
+    }
+    cleanContent = cleanContent.trim();
+  }
+
+  bubble.innerHTML = formatMd(cleanContent);
+  div.appendChild(bubble);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+
+  // Render plan cards separately after the message
+  for (const plan of foundPlans) {
+    renderPlanInChat(plan);
+  }
+}
+
+function renderPlanInChat(plan) {
+  const container = document.getElementById('evolve-messages');
+  if (!container) return;
+  const div = document.createElement('div');
+  div.className = 'evolve-msg assistant';
+  const planId = 'plan-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  if (!window._evolvePlans) window._evolvePlans = {};
+  window._evolvePlans[planId] = plan;
+  div.innerHTML = `<div class="evolve-msg-bubble">
+    <div style="font-weight:600;margin-bottom:10px;font-size:14px;color:var(--accent2);">📋 Proposed Plan</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;">
+      Review the changes below. If they look correct, click <strong style="color:var(--text);">✅ Approve & Execute</strong> to start the live code generation.
+    </div>
+    ${plan.map((p, i) => `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <span style="font-size:11px;color:var(--yellow);font-weight:600;text-transform:uppercase;">${escHtml(p.action || 'edit')}</span>
+          <span style="font-family:var(--font-mono);font-size:11px;color:var(--accent2);">${escHtml(p.path)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);">${escHtml(p.description || '')}</div>
+      </div>
+    `).join('')}
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="btn-primary" onclick="approvePlan('${planId}')">✅ Approve & Execute</button>
+      <button class="btn-secondary" onclick="this.closest('.evolve-msg-bubble').innerHTML += '<div style=\'color:var(--red);margin-top:8px;font-size:12px;\'>❌ Plan rejected by user.</div>'; this.parentElement.remove();">❌ Reject</button>
+    </div>
+  </div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function clearEvolvePending() {
+  evolvePendingPatches = [];
+  evolvePreviewPatches = null;
+  const status = document.getElementById('evolve-status');
+  if (status) status.innerHTML = '<div class="evolve-pending-empty">No active execution. Approve a plan from the chat to begin.</div>';
+}
+
+function clearEvolveChat() {
+  evolveMessages = [];
+  const container = document.getElementById('evolve-messages');
+  if (container) container.innerHTML = '';
+}
+
+
+
+async function sendEvolveMessage() {
+  if (evolveStreaming) return;
+  const input = document.getElementById('evolve-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const model = getEvolveModel();
+  if (!model) { toast('Please select a model in the Evolve panel', 'err'); return; }
+
+  input.value = '';
+
+  // Auto-execute: if user types approval phrases and there's a pending plan, execute it directly
+  const approvalPhrases = ['proceed', 'do it', 'make the edit', 'execute', 'go ahead', 'yes', 'approve', 'please proceed', 'make it', 'implement it'];
+  const lowerText = text.toLowerCase();
+  const pendingPlanIds = Object.keys(window._evolvePlans || {});
+  if (pendingPlanIds.length > 0 && approvalPhrases.some(p => lowerText.includes(p))) {
+    const latestPlanId = pendingPlanIds[pendingPlanIds.length - 1];
+    appendEvolveMessage('user', text);
+    appendEvolveMessage('assistant', '👍 Executing your approved plan now...');
+    approvePlan(latestPlanId);
     return;
   }
 
-  const btn = document.getElementById('apply-update-btn');
-  const log = document.getElementById('update-log');
-  btn.disabled = true;
-  log.style.display = 'block';
-  log.innerHTML = '';
-  logMsg('info', '🚀 Initiating real-time streaming evolution sequence...');
+  evolveMessages.push({ role: 'user', content: text });
+  appendEvolveMessage('user', text);
 
-  let progressSpan = null;
+  const modelObj = models.find(m => m.id === model.id && m.provider === model.provider);
+  const modelName = modelObj ? `${modelObj.icon || ''} ${modelObj.name || model.id}` : model.id;
+
+  appendEvolveLoading(modelName);
+
+  evolveStreaming = true;
+  evolveAbortController = new AbortController();
+
+  let dynamicSystem = EVOLVE_SYSTEM_PROMPT;
+  if (appManifestString) {
+    dynamicSystem = dynamicSystem + '\n\n' + appManifestString;
+  }
 
   try {
-    const r = await fetch('/api/update', {
+    const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        featureRequest: req,
-        provider: updateModel.provider,
-        model: updateModel.id
+        provider: model.provider,
+        model: model.id,
+        messages: evolveMessages.slice(0, -1).concat([{ role: 'user', content: text }]),
+        systemPrompt: dynamicSystem,
+        enableThinking: false
       }),
+      signal: evolveAbortController.signal
     });
-    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Update connection failed'));
-    if (!r.body) throw new Error('Update endpoint did not return a stream');
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Evolve chat failed'));
+    if (!r.body) throw new Error('No response stream');
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let assistantText = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.error) {
+            assistantText += '\n[Error: ' + d.error + ']';
+            break;
+          }
+          if (d.text) {
+            assistantText += d.text;
+            updateEvolveLoading(assistantText);
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    removeEvolveLoading();
+    evolveMessages.push({ role: 'assistant', content: assistantText });
+    appendEvolveMessage('assistant', assistantText);
+  } catch (e) {
+    removeEvolveLoading();
+    let msg = e.message;
+    if (e.name === 'AbortError') msg = 'Stopped by user';
+    appendEvolveMessage('assistant', 'Error: ' + msg);
+    evolveMessages.push({ role: 'assistant', content: 'Error: ' + msg });
+  }
+  evolveStreaming = false;
+  evolveAbortController = null;
+}
+
+function appendEvolveLoading(modelName) {
+  const container = document.getElementById('evolve-messages');
+  if (!container) return;
+  const div = document.createElement('div');
+  div.className = 'evolve-msg assistant';
+  div.id = 'evolve-loading-msg';
+  div.innerHTML = `<div class="evolve-msg-bubble"><div class="action-ticker"><span class="ticker-spinner">⚙️</span><span>${escHtml(modelName)} is thinking...</span></div></div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function updateEvolveLoading(text) {
+  const div = document.getElementById('evolve-loading-msg');
+  if (!div) return;
+  const bubble = div.querySelector('.evolve-msg-bubble');
+  if (bubble) bubble.innerHTML = formatMd(text);
+}
+
+function removeEvolveLoading() {
+  const div = document.getElementById('evolve-loading-msg');
+  if (div) div.remove();
+}
+
+function stopEvolveMessage() {
+  if (evolveAbortController) {
+    evolveAbortController.abort();
+    evolveAbortController = null;
+  }
+}
+
+async function approvePlan(planId) {
+  const plan = window._evolvePlans?.[planId];
+  if (!plan) { toast('Plan not found', 'err'); return; }
+  const btn = document.querySelector(`[onclick*="approvePlan('${planId}')"]`);
+  if (btn) btn.disabled = true;
+  if (btn) btn.textContent = '⏳ Executing...';
+  const model = getEvolveModel();
+  if (!model) { toast('Please select a model first', 'err'); return; }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Executing...';
+
+  const container = document.getElementById('evolve-messages');
+  const div = document.createElement('div');
+  div.className = 'evolve-msg assistant';
+  div.id = 'evolve-execution-' + planId;
+  div.innerHTML = `<div class="evolve-msg-bubble">
+    <div style="color:var(--accent2);font-weight:600;margin-bottom:8px;">🚀 Execution started...</div>
+    <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:400px;overflow-y:auto;font-family:var(--font-mono);font-size:12px;white-space:pre-wrap;word-break:break-word;" id="exec-feed-${planId}"></pre>
+  </div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+
+  const feed = document.getElementById('exec-feed-' + planId);
+
+  try {
+    const r = await fetch('/api/evolve/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: model.provider, model: model.id, plan })
+    });
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Execution failed'));
 
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
@@ -1472,49 +1815,35 @@ async function applyUpdate() {
         if (!line.startsWith('data: ')) continue;
         try {
           const d = JSON.parse(line.slice(6));
-          if (d.type === 'info') {
-            progressSpan = null;
-            logMsg('info', '   • ' + d.message);
-          } else if (d.type === 'progress') {
-            if (!progressSpan) {
-              logMsg('info', '   ⚡ Live code generation output:');
-              progressSpan = document.createElement('span');
-              progressSpan.className = 'log-progress';
-              progressSpan.style.color = 'var(--text-color)';
-              progressSpan.style.fontWeight = '500';
-              progressSpan.style.display = 'block';
-              progressSpan.style.paddingLeft = '15px';
-              progressSpan.style.whiteSpace = 'pre-wrap';
-              log.appendChild(progressSpan);
-            }
-            progressSpan.textContent += d.text;
-            if (progressSpan.textContent.length > 600) {
-              progressSpan.textContent = '...' + progressSpan.textContent.slice(-600);
-            }
-            log.scrollTop = log.scrollHeight;
-          } else if (d.type === 'success') {
-            progressSpan = null;
-            logMsg('ok', '\n✅ ' + d.message);
+          if (d.type === 'chunk') {
+            feed.textContent += d.text;
+            feed.scrollTop = feed.scrollHeight;
+          } else if (d.type === 'backup') {
+            feed.textContent += `\n[Backup created: ${d.dir}]\n`;
+            feed.scrollTop = feed.scrollHeight;
+          } else if (d.type === 'file_complete') {
+            feed.textContent += `\n[✅ ${d.action.toUpperCase()} ${d.path}]\n`;
+            feed.scrollTop = feed.scrollHeight;
+          } else if (d.type === 'file_error') {
+            feed.textContent += `\n[❌ ERROR ${d.path}: ${d.error}]\n`;
+            feed.scrollTop = feed.scrollHeight;
+          } else if (d.type === 'done') {
+            feed.textContent += `\n\n🎉 ${d.message}`;
+            feed.scrollTop = feed.scrollHeight;
+            toast(d.message, 'ok');
+            loadFileTree();
           } else if (d.type === 'error') {
-            progressSpan = null;
-            logMsg('err', '\n❌ Request failed: ' + d.message);
+            feed.textContent += `\n\n❌ ERROR: ${d.message}`;
+            feed.scrollTop = feed.scrollHeight;
+            toast(d.message, 'err');
           }
         } catch { /* skip */ }
       }
     }
-  } catch(e) {
-    logMsg('err', '\n❌ Network error: ' + e.message);
+  } catch (e) {
+    feed.textContent += `\n\n❌ Failed: ${e.message}`;
+    toast('Execution failed: ' + e.message, 'err');
   }
-  btn.disabled = false;
-}
-
-function logMsg(type, text) {
-  const log = document.getElementById('update-log');
-  const span = document.createElement('span');
-  span.className = 'log-' + type;
-  span.textContent = text + '\n';
-  log.appendChild(span);
-  log.scrollTop = log.scrollHeight;
 }
 
 /* ── System prompt ──────────────────────────────────────────────────────────── */
@@ -1743,21 +2072,12 @@ async function apiErrorMessage(response, fallback) {
 }
 
 /* ── Markdown renderer (lightweight) ───────────────────────────────────────── */
-const _updatePromptMap = new Map();
-let _updatePromptIdCounter = 0;
-
 function formatMd(text) {
   let h = escHtml(text);
-  // Code blocks — special-case update-prompt blocks with a copy/send widget
+  // Code blocks
   h = h.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
     const cleanLang = escHtml(lang || 'code');
     const cleanCode = code.trim();
-    if ((lang || '').toLowerCase() === 'update-prompt' || (lang || '').toLowerCase() === 'updateprompt') {
-      const escaped = escHtml(cleanCode);
-      const id = 'up-' + (++_updatePromptIdCounter);
-      _updatePromptMap.set(id, cleanCode);
-      return `<div class="update-prompt-block"><div class="update-prompt-header"><span class="update-prompt-icon">📋</span><span class="update-prompt-title">Optimized Update Prompt</span><span class="update-prompt-hint">Ready to paste into Update / Add Features</span></div><pre class="update-prompt-body"><code>${escaped}</code></pre><div class="update-prompt-actions"><button class="btn-secondary" onclick="copyUpdatePrompt('${id}', this, event)">📋 Copy to clipboard</button><button class="btn-primary" onclick="sendUpdatePrompt('${id}', this, event)">⚡ Send to Update panel</button></div></div>`;
-    }
     return `<div class="code-block"><div class="code-header"><span>${cleanLang}</span><button class="copy-code-btn" onclick="copyCode(this, event)">📋 Copy</button></div><pre><code>${cleanCode}</code></pre></div>`;
   });
   // Inline code
@@ -1807,7 +2127,7 @@ function renderManifestAsPrompt(m) {
   lines.push('=== APP MANIFEST ===');
   lines.push(`You are embedded inside the running app "${m.name}" (${m.description || ''}, v${m.version}).`);
   lines.push('You have READ-ONLY awareness of the codebase via the structured manifest below.');
-  lines.push('Use it to: answer "is X possible?", recommend features, audit the design, and — once a feature is agreed — output a single fenced code block tagged ```update-prompt containing a polished, copy-pasteable feature request the user will paste into the Update / Add Features panel.');
+  lines.push('Use it to: answer "is X possible?", recommend features, audit the design, and — once a feature is agreed — output a fenced code block tagged ```plan containing a JSON array of proposed actions: {path, action, description}.');
   lines.push('');
   lines.push('--- TECH STACK ---');
   (m.techStack || []).forEach(t => lines.push('• ' + t));
@@ -1841,56 +2161,24 @@ function renderManifestAsPrompt(m) {
   lines.push('--- HOW UPDATES WORK ---');
   (m.updateWorkflow || []).forEach(s => lines.push(s));
   lines.push('');
-  lines.push('--- HOW TO WRITE A GREAT UPDATE PROMPT ---');
+  lines.push('--- HOW TO WRITE A GREAT PLAN ---');
   if (m.updatePromptGuide) {
     (m.updatePromptGuide.what_makes_a_great_prompt || []).forEach(t => lines.push('• ' + t));
     lines.push('');
     lines.push('Format convention: ' + (m.updatePromptGuide.format || ''));
     lines.push('');
-    lines.push('Example of a great prompt:');
-    lines.push('```update-prompt');
-    lines.push(m.updatePromptGuide.example || '');
+    lines.push('Example of a great plan:');
+    lines.push('```plan');
+    lines.push(JSON.stringify([
+      { path: 'public/hello.md', action: 'create', description: 'Add a Hello World markdown file' },
+      { path: 'server.js', action: 'edit', description: 'Add a route to serve the new file' }
+    ], null, 2));
     lines.push('```');
   }
   lines.push('');
   lines.push('=== END APP MANIFEST ===');
   return lines.join('\n');
 }
-
-/* ── Update Prompt block actions ───────────────────────────────────────────── */
-async function copyUpdatePrompt(id, btn, ev) {
-  if (ev) ev.stopPropagation();
-  const text = _updatePromptMap.get(id) || '';
-  if (!text) { toast('Prompt not found', 'err'); return; }
-  try {
-    await navigator.clipboard.writeText(text);
-    const orig = btn.innerHTML;
-    btn.innerHTML = '✓ Copied!';
-    btn.style.color = 'var(--green)';
-    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
-    toast('Prompt copied — paste it into Update / Add Features', 'ok');
-  } catch (err) {
-    toast('Copy failed: ' + err.message, 'err');
-  }
-}
-
-function sendUpdatePrompt(id, btn, ev) {
-  if (ev) ev.stopPropagation();
-  const text = _updatePromptMap.get(id) || '';
-  if (!text) { toast('Prompt not found', 'err'); return; }
-  showPanel('update');
-  const ta = document.getElementById('feature-input');
-  if (ta) {
-    ta.value = text;
-    ta.focus();
-    ta.scrollTop = 0;
-  }
-  const orig = btn.innerHTML;
-  btn.innerHTML = '✓ Sent!';
-  btn.style.color = 'var(--green)';
-  setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
-  toast('Prompt loaded into Update / Add Features — pick a model and click Apply', 'ok');
-}
 </script>
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a0da4817ea4ad26e',t:'MTc4MTc4NTU3OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>

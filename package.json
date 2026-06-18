@@ -1,5 +1,5 @@
 {
-  "name": "ai-chat-app",
+  "name": "FreedomAI",
   "version": "1.0.0",
   "description": "Local AI Chat — multi-provider, self-updating",
   "main": "server.js",
