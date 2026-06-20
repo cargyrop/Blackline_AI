@@ -5,9 +5,10 @@ const path = require('path');
 const { exec } = require('child_process');
 
 const app = express();
+app.disable('x-powered-by');
 const PORT = parseInt(process.env.PORT, 10) || 3737;
 const DATA_FILE = path.join(__dirname, 'data', 'config.json');
-const EVOLVE_EXECUTION_TIMEOUT_MS = 15 * 60 * 1000; // Large plans (docs/wiki files) can exceed five minutes.
+const EVOLVE_EXECUTION_TIMEOUT_MS = 15 * 60 * 1000;
 const ALLOWED_PROVIDERS = new Set(['anthropic', 'openai', 'gemini', 'groq', 'openrouter', 'deepseek']);
 
 // ── Simple in-memory rate limiter ────────────────────────────────────
@@ -35,6 +36,13 @@ function rateLimiter(windowMs, max) {
     next();
   };
 }
+// Periodic cleanup to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of rateLimitBuckets) {
+    if (now > b.resetAt + 60000) rateLimitBuckets.delete(k);
+  }
+}, 5 * 60 * 1000).unref();
 
 // ── Security headers middleware ───────────────────────────────────────
 function securityHeaders(req, res, next) {
@@ -49,10 +57,8 @@ function securityHeaders(req, res, next) {
 const GEMINI_FALLBACK_MODELS = [
   { id: 'gemini-2.0-flash',      name: 'Gemini 2.0 Flash' },
   { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash-Lite' },
-  { id: 'gemini-2.0-pro-exp',    name: 'Gemini 2.0 Pro Exp' },
   { id: 'gemini-1.5-flash',      name: 'Gemini 1.5 Flash' },
   { id: 'gemini-1.5-pro',        name: 'Gemini 1.5 Pro' },
-  { id: 'gemini-3.5-flash',      name: 'Gemini 3.5 Flash' },
   { id: 'gemini-2.5-flash',      name: 'Gemini 2.5 Flash' },
 ];
 
@@ -63,9 +69,18 @@ app.use(cors({
   },
 }));
 app.use(securityHeaders);
-app.use(rateLimiter(60000, 60));
+app.use(rateLimiter(60000, 90));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true,
+  lastModified: true,
+  maxAge: '1h',
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  }
+}));
 
 // -- Config persistence --------------------------------------------------------
 function loadConfig() {
@@ -83,7 +98,9 @@ function loadConfig() {
 }
 function saveConfig(cfg) {
   fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(cfg, null, 2));
+  const tmpFile = DATA_FILE + '.tmp.' + Date.now();
+  fs.writeFileSync(tmpFile, JSON.stringify(cfg, null, 2));
+  fs.renameSync(tmpFile, DATA_FILE);
 }
 function prettyModelName(id) {
   return id
@@ -117,13 +134,15 @@ function sanitizeMessages(messages) {
     .map(m => ({ role: m.role, content: m.content.slice(0, 200000) }));
 }
 function safeResolve(base, rel) {
-  if (!rel || typeof rel !== 'string' || path.isAbsolute(rel) || rel.includes('\0')) return null;
+  if (!rel || typeof rel !== 'string' || rel.includes('\0')) return null;
+  // Block absolute paths, including Windows drive letters
+  if (path.isAbsolute(rel) || /^[a-zA-Z]:[\\/]/.test(rel)) return null;
 
   const normalizedBase = path.resolve(base);
-  const normalizedRel = path.normalize(rel).replace(/^([.][\/])+/, '');
-  const segments = normalizedRel.split(/[\/]+/).filter(Boolean);
-  const blocked = new Set(['node_modules', '.git', 'data', '.arena', '.cache', 'dist', 'build', 'coverage']);
-  if (segments.length === 0 || segments.some(seg => seg === '..' || blocked.has(seg))) return null;
+  const normalizedRel = path.normalize(rel).replace(/^([.][\\/])+/, '');
+  const segments = normalizedRel.split(/[\\/]+/).filter(Boolean);
+  const blocked = new Set(['node_modules', '.git', 'data', '.arena', '.cache', 'dist', 'build', 'coverage', '.env']);
+  if (segments.length === 0 || segments.some(seg => seg === '..' || blocked.has(seg.toLowerCase()))) return null;
 
   const target = path.resolve(normalizedBase, normalizedRel);
   const relative = path.relative(normalizedBase, target);
@@ -136,7 +155,7 @@ app.get('/api/keys', (req, res) => {
   const cfg = loadConfig();
   const safe = {};
   for (const [k, v] of Object.entries(cfg.keys || {})) {
-    safe[k] = v ? '????????' + v.slice(-4) : '';
+    safe[k] = v ? '••••' + v.slice(-4) : '';
   }
   res.json(safe);
 });
@@ -160,31 +179,36 @@ app.delete('/api/keys/:provider', (req, res) => {
   res.json({ ok: true });
 });
 
+// -- Health --------------------------------------------------------------------
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, version: '1.2.0', time: new Date().toISOString() });
+});
+
 // -- Model discovery -----------------------------------------------------------
 app.get('/api/models', async (req, res) => {
   const cfg = loadConfig();
   const keys = cfg.keys || {};
   const models = [];
 
-  // Determine if a model is capable of self-updating (~70KB code / structured JSON)
+  // Determine if a model is capable of self-updating
   const isUpdateCapable = (provider, id, name = '') => {
     const full = `${id} ${name}`.toLowerCase();
     if (provider === 'gemini' || provider === 'anthropic' || provider === 'deepseek') return true;
-    if (provider === 'openai') return /gpt-4|o1|o3|gpt-4\.5/i.test(full);
+    if (provider === 'openai') return /gpt-4|o1|o3|gpt-5/i.test(full);
     if (provider === 'groq') return /70b|deepseek|3\.3|mixtral/i.test(full);
     if (provider === 'openrouter') return /sonnet|opus|gpt-4|o1|o3|gemini|70b|405b|deepseek|coder/i.test(full);
-    if (provider === 'ollama') return /70b|deepseek|qwen|coder|llama3\.3|phi4/i.test(full);
+    if (provider === 'ollama') return /70b|deepseek|qwen|coder|llama3|phi4|mistral/i.test(full);
     return false;
   };
 
-  // Anthropic
+  // Anthropic – current Claude models (Oct 2025)
   if (keys.anthropic) {
     models.push(
+      { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'anthropic', icon: '◖' },
       { id: 'claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet', provider: 'anthropic', icon: '◖' },
       { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'anthropic', icon: '◖' },
-      { id: 'claude-3-opus-20240229',    name: 'Claude 3 Opus',     provider: 'anthropic', icon: '◖' },
       { id: 'claude-3-5-haiku-20241022',  name: 'Claude 3.5 Haiku',  provider: 'anthropic', icon: '◖' },
-      { id: 'claude-sonnet-4-6',          name: 'Claude Sonnet 4.6 (Legacy)', provider: 'anthropic', icon: '◖' },
+      { id: 'claude-3-opus-20240229',    name: 'Claude 3 Opus',     provider: 'anthropic', icon: '◖' },
     );
   }
 
@@ -200,8 +224,8 @@ app.get('/api/models', async (req, res) => {
         const chat = data.data
           .filter(m => m.id.startsWith('gpt') || /^o\d/.test(m.id))
           .filter(m => !/image|audio|realtime|transcribe|tts|embedding|moderation/i.test(m.id))
-          .sort((a, b) => b.created - a.created)
-          .slice(0, 15);
+          .sort((a, b) => (b.created || 0) - (a.created || 0))
+          .slice(0, 20);
         chat.forEach(m => models.push({ id: m.id, name: m.id, provider: 'openai', icon: '◎' }));
       } else {
         throw new Error('OpenAI fetch failed');
@@ -210,7 +234,7 @@ app.get('/api/models', async (req, res) => {
       models.push(
         { id: 'gpt-4o',         name: 'GPT-4o',         provider: 'openai', icon: '◎' },
         { id: 'gpt-4o-mini',    name: 'GPT-4o mini',    provider: 'openai', icon: '◎' },
-        { id: 'o1',             name: 'o1',             provider: 'openai', icon: '◎' },
+        { id: 'gpt-4.1',        name: 'GPT-4.1',        provider: 'openai', icon: '◎' },
         { id: 'o3-mini',        name: 'o3-mini',        provider: 'openai', icon: '◎' }
       );
     }
@@ -247,18 +271,12 @@ app.get('/api/models', async (req, res) => {
       } while (pageToken);
 
       const preferredOrder = [
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
         'gemini-2.0-flash',
         'gemini-2.0-flash-lite',
-        'gemini-2.0-pro-exp',
-        'gemini-1.5-flash',
         'gemini-1.5-pro',
-        'gemini-3.5-flash',
-        'gemini-3.1-pro',
-        'gemini-3-flash',
-        'gemini-3.1-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
-        'gemini-2.5-pro',
+        'gemini-1.5-flash',
       ];
       discovered.sort((a, b) => {
         const ai = preferredOrder.indexOf(a.id);
@@ -266,7 +284,7 @@ app.get('/api/models', async (req, res) => {
         if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
         return a.name.localeCompare(b.name);
       });
-      models.push(...discovered.slice(0, 15));
+      models.push(...discovered.slice(0, 20));
     } catch {
       GEMINI_FALLBACK_MODELS.forEach(m =>
         models.push({ ...m, provider: 'gemini', icon: '◇' })
@@ -317,8 +335,8 @@ app.get('/api/models', async (req, res) => {
     } catch {
       models.push(
         { id: 'openai/gpt-4o',                    provider: 'openrouter', name: 'GPT-4o (via OpenRouter)',       icon: '⬡' },
-        { id: 'anthropic/claude-sonnet-4',         provider: 'openrouter', name: 'Claude Sonnet 4 (OR)',          icon: '⬡' },
-        { id: 'google/gemini-2.5-flash',           provider: 'openrouter', name: 'Gemini 2.5 Flash (OR)',        icon: '⬡' },
+        { id: 'anthropic/claude-3.5-sonnet',      provider: 'openrouter', name: 'Claude 3.5 Sonnet (OR)',        icon: '⬡' },
+        { id: 'google/gemini-2.0-flash-001',      provider: 'openrouter', name: 'Gemini 2.0 Flash (OR)',        icon: '⬡' },
         { id: 'meta-llama/llama-3.3-70b-instruct', provider: 'openrouter', name: 'Llama 3.3 70B (OR)',           icon: '⬡' },
         { id: 'deepseek/deepseek-chat',            provider: 'openrouter', name: 'DeepSeek Chat (OR)',           icon: '⬡' },
       );
@@ -422,8 +440,8 @@ app.post('/api/chat', async (req, res) => {
         stream: true,
         messages: messages.filter(m => m.role !== 'system'),
       };
-      if (req.body.enableThinking && model === 'claude-3-7-sonnet-20250219') {
-        body.thinking = { type: 'enabled', budget_tokens: 4096 };
+      if (req.body.enableThinking && /sonnet-4|3-7-sonnet/.test(model)) {
+        body.thinking = { type: 'enabled', budget_tokens: 2000 };
       }
       if (safeSystemPrompt) body.system = safeSystemPrompt;
 
@@ -475,15 +493,15 @@ app.post('/api/chat', async (req, res) => {
         deepseek:   'https://api.deepseek.com/v1/chat/completions',
       };
       const msgs = safeSystemPrompt
-        ? [{ role: 'system', content: safeSystemPrompt }, ...messages]
-        : messages;
+        ? [{ role: 'system', content: safeSystemPrompt }, ...messages.filter(m => m.role !== 'system')]
+        : messages.filter(m => m.role !== 'system');
 
       const r = await fetch(endpoints[provider], {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${keys[provider]}`,
           'Content-Type': 'application/json',
-          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737' } : {}),
+          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737', 'X-Title': 'BLACKLINE AI' } : {}),
         },
         body: JSON.stringify({
           model,
@@ -523,7 +541,9 @@ app.post('/api/chat', async (req, res) => {
       reportUsageAndFinish();
 
     } else if (provider === 'gemini') {
-      const msgs = messages.map(m => ({
+      // Gemini expects only user/model turns; filter out stray system messages
+      const chatMessages = messages.filter(m => m.role !== 'system');
+      const msgs = chatMessages.map(m => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }],
       }));
@@ -554,16 +574,16 @@ app.post('/api/chat', async (req, res) => {
               assistantAnswer += txt;
               send({ text: txt });
             }
-            if (d.candidates?.[0]?.finishReason) reportUsageAndFinish();
           } catch { /* skip */ }
         }
       }
       reportUsageAndFinish();
 
     } else if (provider === 'ollama') {
+      const chatMessages = messages.filter(m => m.role !== 'system');
       const msgs = safeSystemPrompt
-        ? [{ role: 'system', content: safeSystemPrompt }, ...messages]
-        : messages;
+        ? [{ role: 'system', content: safeSystemPrompt }, ...chatMessages]
+        : chatMessages;
       const r = await fetch('http://localhost:11434/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -571,7 +591,7 @@ app.post('/api/chat', async (req, res) => {
         signal: AbortSignal.timeout(120000),
       });
       if (!r.ok) {
-        send({ error: 'Ollama request failed' });
+        send({ error: 'Ollama request failed – is Ollama running on http://localhost:11434 ?' });
         return res.end();
       }
       for await (const chunk of r.body) {
@@ -600,7 +620,7 @@ app.post('/api/chat', async (req, res) => {
   res.end();
 });
 
-// -- App Manifest (lets the chat model know what the app is) -------------------
+// -- App Manifest --------------------------------------------------------------
 app.get('/api/manifest', (req, res) => {
   try {
     const appDir = __dirname;
@@ -614,7 +634,6 @@ app.get('/api/manifest', (req, res) => {
       : '';
     const pkg       = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
 
-    // Auto-derive file map (line counts only — no source content shipped)
     const readFileMap = (dir, base = '') => {
       const out = [];
       for (const entry of fs.readdirSync(dir)) {
@@ -627,11 +646,9 @@ app.get('/api/manifest', (req, res) => {
       return out;
     };
 
-    // Auto-derive API routes
     const endpoints = [...serverSrc.matchAll(/app\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/g)]
       .map(m => ({ method: m[1].toUpperCase(), path: m[2] }));
 
-    // Auto-derive frontend panels (data-panel="...") and JS functions
     const panels    = [...new Set([...indexSrc.matchAll(/data-panel="([^"${}]+)"/g)].map(m => m[1]))];
     const functions = [...new Set([...appJsSrc.matchAll(/function\s+(\w+)\s*\(/g)].map(m => m[1]))].sort();
 
@@ -703,7 +720,7 @@ app.get('/api/manifest', (req, res) => {
   }
 });
 
-// -- File tree (full contents for Evolve App) --------------------------------
+// -- File tree ----------------------------------------------------------------
 app.get('/api/files', (req, res) => {
   try {
     const appDir = __dirname;
@@ -729,7 +746,7 @@ app.get('/api/files', (req, res) => {
   }
 });
 
-// -- Evolve Execute (single-step: plan -> live code generation -> writes) ----
+// -- Evolve Execute ------------------------------------------------------------
 app.post('/api/evolve/execute', async (req, res) => {
   const { provider, model, plan } = req.body;
   if (!provider || !model) return res.status(400).json({ error: 'provider and model required' });
@@ -789,22 +806,14 @@ app.post('/api/evolve/execute', async (req, res) => {
     return res.end();
   }
 
-  const renderFilesDump = () => files.map(f => `=== FILE: ${f.path} ===
-${f.content}`).join('\n\n');
+  const renderFilesDump = () => files.map(f => `=== FILE: ${f.path} ===\n${f.content}`).join('\n\n');
   let filesDump = renderFilesDump();
 
   function stripGeneratedFileContent(text, filePath) {
     let out = String(text || '').replace(/\r\n/g, '\n').trim();
-
-    // If the model ignored instructions and wrapped the answer in a code fence,
-    // prefer the fenced payload. This is common for markdown files.
     const fenced = out.match(/^```[\w-]*\n([\s\S]*?)\n```\s*$/);
     if (fenced) out = fenced[1].trim();
-
-    // If it included our marker anyway, remove only the marker for this file.
     out = out.replace(/^=== FILE:\s*.+?\s*===\n/i, '').trim();
-
-    // Remove accidental trailing fences/explanations in the most common forms.
     out = out.replace(/\n```\s*$/g, '').trim();
     return out;
   }
@@ -891,7 +900,7 @@ ${f.content}`).join('\n\n');
         headers: {
           Authorization: `Bearer ${keys[provider]}`,
           'Content-Type': 'application/json',
-          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737' } : {}),
+          ...(provider === 'openrouter' ? { 'HTTP-Referer': 'http://localhost:3737', 'X-Title': 'BLACKLINE AI' } : {}),
         },
         body: JSON.stringify({
           model,
@@ -1090,7 +1099,6 @@ OUTPUT RULES:
       applied.push({ path: filePath, action });
       send({ type: 'file_complete', path: filePath, action });
 
-      // Keep context current for subsequent files in the same plan.
       const existingIdx = files.findIndex(f => f.path === filePath);
       if (existingIdx >= 0) files[existingIdx].content = generated;
       else files.push({ path: filePath, content: generated });
@@ -1124,7 +1132,6 @@ app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 app.listen(PORT, () => {
   console.log(`\n[OK]  BLACKLINE AI running at http://localhost:${PORT}\n`);
-  // Try to open browser automatically
   if (!process.env.NO_OPEN_BROWSER) {
     const url = `http://localhost:${PORT}`;
     const cmd = process.platform === 'win32' ? `start ${url}` :

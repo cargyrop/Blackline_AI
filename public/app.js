@@ -1,12 +1,24 @@
+/* BLACKLINE AI — app.js v1.2
+   Week 1 Stability Pack
+   - marked.js + highlight.js markdown
+   - conversation rename + search filter
+   - Enter to send / Shift+Enter newline
+   - Esc to close modal, keyboard nav
+   - model select persistence
+   - stop race fix, copy button class toggle
+   - a11y improvements
+*/
+
 /* ── State ──────────────────────────────────────────────────────────────────── */
 let models = [];
-let currentModel = null;
+let currentModel = loadStoredJson('currentModel', null);
 let conversations = loadStoredJson('conversations', []);
 if (!Array.isArray(conversations)) conversations = [];
 let currentConvId = null;
+let convSearchFilter = '';
 let systemPrompt = localStorage.getItem('systemPrompt') || '';
-let appManifest = null;             // cached GET /api/manifest response
-let appManifestString = '';         // pre-formatted codebase context for the Evolve panel
+let appManifest = null;
+let appManifestString = '';
 let streaming = false;
 let activeAbortController = null;
 
@@ -19,33 +31,97 @@ const PROVIDERS = [
   { id: 'deepseek',   label: 'DeepSeek',     icon: '▽', placeholder: 'sk-...' },
 ];
 
+/* ── Markdown (marked + highlight.js) ───────────────────────────────────────── */
+let mdReady = false;
+function initMarkdown() {
+  if (!window.marked) return;
+  const renderer = new marked.Renderer();
+  const origCode = renderer.code.bind(renderer);
+  renderer.code = (code, lang) => {
+    let highlighted = escHtml(code);
+    try {
+      if (window.hljs) {
+        if (lang && hljs.getLanguage(lang)) {
+          highlighted = hljs.highlight(code, { language: lang }).value;
+        } else {
+          highlighted = hljs.highlightAuto(code).value;
+        }
+      }
+    } catch(e) {}
+    const cleanLang = escHtml(lang || 'code');
+    return `<div class="code-block"><div class="code-header"><span>${cleanLang}</span><button class="copy-code-btn" type="button" onclick="copyCode(this, event)">COPY</button></div><pre><code class="hljs language-${cleanLang}">${highlighted}</code></pre></div>`;
+  };
+  marked.setOptions({ renderer, gfm: true, breaks: true });
+  mdReady = true;
+}
+function formatMd(text) {
+  const src = String(text || '');
+  if (window.marked && mdReady) {
+    try { return marked.parse(src); } catch(e) {}
+  }
+  // fallback – very basic
+  return escHtml(src).replace(/\n/g, '<br>');
+}
+
 /* ── Init ───────────────────────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
+  initMarkdown();
   renderConvList();
   loadModels();
   buildKeysList();
   checkOllama();
-  if (systemPrompt) document.getElementById('system-prompt-input').value = systemPrompt;
-
+  if (systemPrompt) {
+    const si = document.getElementById('system-prompt-input');
+    if (si) si.value = systemPrompt;
+  }
   loadAppManifest();
   populateEvolveModelSelect();
   loadFileTree();
   initEvolveResizer();
   renderEvolveMessages();
 
-  // Ctrl/Cmd+Enter support in both chat surfaces
-  document.getElementById('msg-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      sendMessage();
+  const msgInput = document.getElementById('msg-input');
+  if (msgInput) msgInput.addEventListener('keydown', onInputKey);
+  const evoInput = document.getElementById('evolve-input');
+  if (evoInput) evoInput.addEventListener('keydown', onEvolveInputKey);
+
+  // make suggestions keyboard accessible
+  document.querySelectorAll('.suggestion').forEach(el => {
+    el.setAttribute('tabindex', '0');
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); insertSuggestion(el); }});
+  });
+
+  // Global Esc handler
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      // close rename input first
+      const ren = document.querySelector('.conv-rename-input');
+      if (ren) { cancelRenameConversation(); return; }
+      // close system modal
+      closeModal();
     }
   });
-  document.getElementById('evolve-input')?.addEventListener('keydown', onEvolveInputKey);
+
+  // Conversation list keyboard navigation
+  const convList = document.getElementById('conv-list');
+  if (convList) {
+    convList.setAttribute('tabindex', '0');
+    convList.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      const visible = getFilteredConversations();
+      if (!visible.length) return;
+      let idx = visible.findIndex(c => c.id === currentConvId);
+      if (idx === -1) idx = 0;
+      idx += e.key === 'ArrowDown' ? 1 : -1;
+      idx = Math.max(0, Math.min(visible.length - 1, idx));
+      loadConversation(visible[idx].id);
+    });
+  }
 
   if (conversations.length === 0) newConversation(false);
   else loadConversation(conversations[0].id);
 });
-
 
 function initEvolveResizer() {
   const layout = document.querySelector('.evolve-layout');
@@ -96,11 +172,11 @@ function initEvolveResizer() {
 function showPanel(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById(name + '-panel').classList.add('visible');
-  document.querySelector(`[data-panel="${name}"]`).classList.add('active');
+  const panel = document.getElementById(name + '-panel');
+  if (panel) panel.classList.add('visible');
+  const nav = document.querySelector(`[data-panel="${name}"]`);
+  if (nav) nav.classList.add('active');
 
-  // Keep each area focused on controls that actually affect it. The top toolbar
-  // controls only the main Chat panel; Evolve and Settings have their own controls.
   const toolbar = document.getElementById('toolbar');
   if (toolbar) toolbar.classList.toggle('hidden', name !== 'chat');
 
@@ -114,13 +190,15 @@ function showPanel(name) {
 /* ── Model loading ──────────────────────────────────────────────────────────── */
 async function loadModels() {
   const sel = document.getElementById('model-select');
+  if (!sel) return;
+  const previousVal = sel.value;
   sel.innerHTML = '<option value="">Loading models…</option>';
   try {
     const r = await fetch('/api/models');
     if (!r.ok) throw new Error(await apiErrorMessage(r, 'Could not load models'));
     models = await r.json();
     if (!Array.isArray(models)) throw new Error('Model response was not an array');
-    populateModelSelect();
+    populateModelSelect(previousVal);
     checkOllama();
   } catch(e) {
     sel.innerHTML = '<option value="">Error loading models</option>';
@@ -128,16 +206,18 @@ async function loadModels() {
   }
 }
 
-function populateModelSelect() {
+function populateModelSelect(preferredVal) {
   const sel = document.getElementById('model-select');
   const count = document.getElementById('model-count');
+  if (!sel) return;
   sel.innerHTML = '';
 
   populateEvolveModelSelect();
 
   if (models.length === 0) {
-    sel.innerHTML = '<option value="" style="background: #1e2030; color: #ffffff;">— Add an API key in Settings —</option>';
-    count.textContent = '';
+    sel.innerHTML = '<option value="">— Add an API key in Settings —</option>';
+    if (count) count.textContent = '';
+    currentModel = null;
     return;
   }
 
@@ -149,39 +229,45 @@ function populateModelSelect() {
   for (const [prov, ms] of Object.entries(groups)) {
     const og = document.createElement('optgroup');
     og.label = providerLabel(prov);
-    og.style.background = '#11131d';
-    og.style.color = '#a5b4fc';
-    og.style.fontWeight = '700';
     for (const m of ms) {
       const opt = document.createElement('option');
       opt.value = JSON.stringify({ id: m.id, provider: m.provider });
       opt.textContent = `${m.icon || ''} ${m.name}`;
-      opt.style.background = '#1e2030';
-      opt.style.color = '#ffffff';
-      opt.style.padding = '6px';
-      opt.style.fontWeight = '600';
       og.appendChild(opt);
     }
     sel.appendChild(og);
   }
-  count.textContent = `${models.length} model${models.length !== 1 ? 's' : ''}`;
+  if (count) count.textContent = `${models.length} model${models.length !== 1 ? 's' : ''}`;
+
+  // restore selection: preferredVal (from reload) > saved currentModel > first
+  let toSelect = null;
+  const tryVals = [preferredVal, currentModel ? JSON.stringify(currentModel) : null, localStorage.getItem('currentModel')].filter(Boolean);
+  for (const v of tryVals) {
+    if ([...sel.options].some(o => o.value === v)) { toSelect = v; break; }
+  }
+  if (toSelect) sel.value = toSelect;
   onModelChange();
 }
-
 
 function providerLabel(p) {
   return { anthropic:'Anthropic', openai:'OpenAI', gemini:'Google Gemini', groq:'Groq', openrouter:'OpenRouter', deepseek:'DeepSeek', ollama:'Local (Ollama)' }[p] || p;
 }
 
 function onModelChange() {
-  const val = document.getElementById('model-select').value;
-  if (!val) { currentModel = null; return; }
-  try { currentModel = JSON.parse(val); } catch { currentModel = null; }
+  const sel = document.getElementById('model-select');
+  if (!sel) { currentModel = null; return; }
+  const val = sel.value;
+  if (!val) { currentModel = null; localStorage.removeItem('currentModel'); return; }
+  try {
+    currentModel = JSON.parse(val);
+    localStorage.setItem('currentModel', val);
+  } catch { currentModel = null; }
 }
 
 /* ── API Keys UI ────────────────────────────────────────────────────────────── */
 async function buildKeysList() {
   const container = document.getElementById('keys-list');
+  if (!container) return;
   let savedKeys = {};
   try {
     const r = await fetch('/api/keys');
@@ -203,21 +289,24 @@ async function buildKeysList() {
         ${isSet ? `<button class="delete-key-btn" onclick="deleteKey('${p.id}')" title="Remove key">×</button>` : '<button class="delete-key-btn placeholder" tabindex="-1" aria-hidden="true">×</button>'}
       </div>`;
     container.appendChild(row);
+    // Enter to save
+    const input = row.querySelector('.key-input');
+    if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveKey(p.id); }});
   }
 }
 
 async function saveKey(provider) {
   const input = document.getElementById('key-' + provider);
+  if (!input) return;
   const key = input.value.trim();
   if (!key) { toast('Please enter a key first', 'err'); return; }
   try {
-    await fetch('/api/keys', {
+    const r = await fetch('/api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, key }),
-    }).then(async r => {
-      if (!r.ok) throw new Error(await apiErrorMessage(r, 'Save failed'));
     });
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Save failed'));
     input.value = '';
     toast(`${provider} key saved ✓`, 'ok');
     await buildKeysList();
@@ -240,6 +329,7 @@ async function deleteKey(provider) {
 async function checkOllama() {
   const dot = document.getElementById('ollama-dot');
   const txt = document.getElementById('ollama-status-text');
+  if (!dot || !txt) return;
   const localModels = models.filter(m => m.provider === 'ollama');
   if (localModels.length > 0) {
     dot.className = 'status-dot online';
@@ -289,6 +379,7 @@ function updateTokenCounterUI() {
 
 function deleteConversation(id, e) {
   e.stopPropagation();
+  if (!confirm('Delete this conversation?')) return;
   conversations = conversations.filter(c => c.id !== id);
   saveConversations();
   renderConvList();
@@ -307,7 +398,8 @@ function saveConversations() {
     const serialized = JSON.stringify(conversations);
     const sizeBytes = new Blob([serialized]).size;
     if (sizeBytes > 4 * 1024 * 1024) {
-      console.warn('[storage] Conversations size:', (sizeBytes / 1024 / 1024).toFixed(1), 'MB - near localStorage limit');
+      console.warn('[storage] Conversations size:', (sizeBytes / 1024 / 1024).toFixed(1), 'MB');
+      toast('Conversations approaching localStorage limit', 'err');
     }
     localStorage.setItem('conversations', serialized);
   } catch(e) {
@@ -315,23 +407,93 @@ function saveConversations() {
   }
 }
 
+function getFilteredConversations() {
+  const q = convSearchFilter.trim().toLowerCase();
+  if (!q) return conversations;
+  return conversations.filter(c => (c.title || '').toLowerCase().includes(q));
+}
+
 function renderConvList() {
   const list = document.getElementById('conv-list');
+  if (!list) return;
+  const filtered = getFilteredConversations();
   list.innerHTML = '';
-  for (const c of conversations) {
+  for (const c of filtered) {
     const el = document.createElement('div');
     el.className = 'conv-item' + (c.id === currentConvId ? ' active' : '');
+    el.setAttribute('data-id', c.id);
+    el.setAttribute('role', 'listitem');
+    el.setAttribute('tabindex', '0');
     el.innerHTML = `<span class="conv-item-title">${escHtml(c.title)}</span>
-      <span class="conv-delete" onclick="deleteConversation('${c.id}', event)">✕</span>`;
-    el.onclick = () => loadConversation(c.id);
+      <button class="conv-rename-btn" onclick="startRenameConversation('${c.id}', event)" title="Rename" aria-label="Rename conversation">✎</button>
+      <button class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="Delete" aria-label="Delete conversation">✕</button>`;
+    el.addEventListener('click', (e) => { if (e.target.closest('button')) return; loadConversation(c.id); });
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadConversation(c.id); }});
     list.appendChild(el);
   }
+  if (filtered.length === 0 && conversations.length > 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'padding:8px 10px;color:var(--text-dim);font-size:11px;';
+    empty.textContent = 'No matches';
+    list.appendChild(empty);
+  }
+}
+
+function filterConversations(q) {
+  convSearchFilter = q || '';
+  renderConvList();
+}
+function clearConvSearch() {
+  const inp = document.getElementById('conv-search');
+  if (inp) { inp.value = ''; filterConversations(''); inp.focus(); }
+}
+
+let renamingConvId = null;
+function startRenameConversation(id, e) {
+  e.stopPropagation();
+  const item = document.querySelector(`.conv-item[data-id="${CSS.escape(id)}"]`);
+  if (!item) return;
+  const titleEl = item.querySelector('.conv-item-title');
+  const conv = conversations.find(c => c.id === id);
+  if (!conv) return;
+  renamingConvId = id;
+  const input = document.createElement('input');
+  input.className = 'conv-rename-input';
+  input.value = conv.title;
+  input.setAttribute('aria-label', 'Rename conversation');
+  const finish = (save) => {
+    if (renamingConvId !== id) return;
+    renamingConvId = null;
+    if (save) {
+      const newTitle = input.value.trim();
+      if (newTitle) {
+        conv.title = newTitle.slice(0, 80);
+        saveConversations();
+      }
+    }
+    renderConvList();
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    ev.stopPropagation();
+  });
+  input.addEventListener('blur', () => finish(true));
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+}
+function cancelRenameConversation() {
+  if (!renamingConvId) return;
+  const id = renamingConvId;
+  renamingConvId = null;
+  renderConvList();
 }
 
 function updateConvTitle(id, firstMsg) {
   const conv = conversations.find(c => c.id === id);
   if (!conv || conv.title !== 'New chat') return;
-  conv.title = firstMsg.slice(0, 40) + (firstMsg.length > 40 ? '…' : '');
+  conv.title = firstMsg.slice(0, 60) + (firstMsg.length > 60 ? '…' : '');
   saveConversations();
   renderConvList();
 }
@@ -339,60 +501,62 @@ function updateConvTitle(id, firstMsg) {
 /* ── Rendering messages ─────────────────────────────────────────────────────── */
 function renderMessages(msgs) {
   const container = document.getElementById('messages');
+  if (!container) return;
   if (!msgs || msgs.length === 0) {
     container.innerHTML = `
       <div id="empty-state">
-        <div class="hero">▰</div>
+        <div class="hero" aria-hidden="true">▰</div>
         <h2>Ready to chat</h2>
         <p>Select a model, then send a message. Add API keys in Settings to unlock cloud providers.</p>
         <div class="suggestions">
-          <div class="suggestion" onclick="insertSuggestion(this)">Explain quantum computing</div>
-          <div class="suggestion" onclick="insertSuggestion(this)">Write a Python script</div>
-          <div class="suggestion" onclick="insertSuggestion(this)">Summarize a concept</div>
-          <div class="suggestion" onclick="insertSuggestion(this)">Debug my code</div>
+          <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Explain quantum computing</div>
+          <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Write a Python script</div>
+          <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Summarize a concept</div>
+          <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Debug my code</div>
         </div>
       </div>`;
+    document.querySelectorAll('#empty-state .suggestion').forEach(el => {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); insertSuggestion(el); }});
+    });
     return;
   }
   container.innerHTML = '';
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i];
-    const modelInfo = msg.model ? msg.model : null;
-    appendMessage(msg.role, msg.content, false, modelInfo, i, msg.thinking, msg.thinkingTime);
+    appendMessage(msg.role, msg.content, false, msg.model || null, i, msg.thinking, msg.thinkingTime);
   }
   scrollBottom();
 }
 
 function appendMessage(role, content, animate = true, model = null, msgIdx = null, thinking = null, thinkingTime = null) {
   const container = document.getElementById('messages');
+  if (!container) return null;
   const empty = document.getElementById('empty-state');
   if (empty) empty.remove();
 
   const div = document.createElement('div');
   div.className = `message ${role}`;
-  if (msgIdx !== null) div.dataset.msgIdx = msgIdx;
+  if (msgIdx !== null) div.dataset.msgIdx = String(msgIdx);
 
   const avatar = role === 'user' ? 'USR' : 'AI';
-  let bubbleContent = role === 'assistant' ? formatMd(content) : escHtml(content);
+  let bubbleContent = role === 'assistant' ? formatMd(content) : escHtml(content).replace(/\n/g, '<br>');
 
-  // Append model label to assistant messages if model info is present
   if (role === 'assistant' && model) {
     const modelName = model.name || model.id || 'Unknown model';
     const providerIcon = model.icon || '';
     bubbleContent += `<span class="model-label">${providerIcon} ${escHtml(modelName)}</span>`;
   }
 
-  // Thinking box (if present)
   let thinkingHtml = '';
   if (role === 'assistant' && thinking && thinking.trim()) {
     thinkingHtml = `
-      <div class="thinking-container permanent-thinking">
-        <div class="thinking-header" onclick="toggleThinking(this)">
+      <div class="thinking-container permanent-thinking collapsed">
+        <div class="thinking-header" onclick="toggleThinking(this)" role="button" tabindex="0">
           <div class="thinking-status">
-            <span class="thinking-spinner">CPU</span>
-            <span class="thinking-title">Real-time Chain of Thought (${thinkingTime ? thinkingTime + 's' : 'Considered'})</span>
+            <span class="thinking-spinner" aria-hidden="true">⚡</span>
+            <span class="thinking-title">Chain of Thought (${thinkingTime ? thinkingTime + 's' : '–'})</span>
           </div>
-          <span class="thinking-toggle-btn">▼</span>
+          <span class="thinking-toggle-btn" aria-hidden="true">▼</span>
         </div>
         <div class="thinking-content">
           <pre><code>${escHtml(thinking.trim())}</code></pre>
@@ -400,19 +564,20 @@ function appendMessage(role, content, animate = true, model = null, msgIdx = nul
       </div>`;
   }
 
-  // Action buttons bar
   let actionsHtml = `<div class="msg-actions">`;
-  if (role === 'user') {
-    actionsHtml += `<button class="msg-action-btn" onclick="copyMsgAction(${msgIdx}, this)">COPY</button>`;
-    actionsHtml += `<button class="msg-action-btn" onclick="editMsgAction(${msgIdx})">EDIT</button>`;
-  } else if (role === 'assistant') {
-    actionsHtml += `<button class="msg-action-btn" onclick="copyMsgAction(${msgIdx}, this)">COPY</button>`;
-    actionsHtml += `<button class="msg-action-btn" onclick="regenMsgAction(${msgIdx})">REGEN</button>`;
+  if (msgIdx !== null) {
+    if (role === 'user') {
+      actionsHtml += `<button class="msg-action-btn" type="button" onclick="copyMsgAction(${msgIdx}, this)">COPY</button>`;
+      actionsHtml += `<button class="msg-action-btn" type="button" onclick="editMsgAction(${msgIdx})">EDIT</button>`;
+    } else if (role === 'assistant') {
+      actionsHtml += `<button class="msg-action-btn" type="button" onclick="copyMsgAction(${msgIdx}, this)">COPY</button>`;
+      actionsHtml += `<button class="msg-action-btn" type="button" onclick="regenMsgAction(${msgIdx})">REGEN</button>`;
+    }
   }
   actionsHtml += `</div>`;
 
   div.innerHTML = `
-    <div class="msg-avatar">${avatar}</div>
+    <div class="msg-avatar" aria-hidden="true">${avatar}</div>
     <div class="msg-bubble-container">
       ${thinkingHtml}
       <div class="msg-bubble">${bubbleContent}</div>
@@ -425,34 +590,30 @@ function appendMessage(role, content, animate = true, model = null, msgIdx = nul
 
 function appendTypingBubble() {
   const container = document.getElementById('messages');
+  if (!container) return null;
   const empty = document.getElementById('empty-state');
   if (empty) empty.remove();
   const div = document.createElement('div');
   div.className = 'message assistant';
   div.id = 'active-assistant-message';
-  div.innerHTML = `<div class="msg-avatar">AI</div>
+  div.innerHTML = `<div class="msg-avatar" aria-hidden="true">AI</div>
     <div class="msg-bubble-container" id="active-assistant-container">
-      <!-- Live Action Ticker -->
       <div id="live-action-ticker" class="action-ticker">
-        <span class="ticker-spinner">⚙️</span>
-        <span id="action-ticker-text">Executing: Handshaking with AI provider API...</span>
+        <span class="ticker-spinner" aria-hidden="true">⚙️</span>
+        <span id="action-ticker-text">Connecting…</span>
       </div>
-
-      <!-- Live Real-Time Thoughts Box -->
       <div id="live-thinking-container" class="thinking-container" style="display: none;">
-        <div class="thinking-header" onclick="toggleThinking(this)">
+        <div class="thinking-header" onclick="toggleThinking(this)" role="button" tabindex="0">
           <div class="thinking-status">
-            <span class="thinking-spinner active">⚡</span>
-            <span class="thinking-title">Real-time Chain of Thought (<span id="thinking-timer">0.0s</span>)</span>
+            <span class="thinking-spinner active" aria-hidden="true">⚡</span>
+            <span class="thinking-title">Chain of Thought (<span id="thinking-timer">0.0s</span>)</span>
           </div>
-          <span class="thinking-toggle-btn">▼</span>
+          <span class="thinking-toggle-btn" aria-hidden="true">▼</span>
         </div>
         <div class="thinking-content" id="thinking-scroll-box">
           <pre><code id="thinking-content-text"></code></pre>
         </div>
       </div>
-
-      <!-- Main Live Final Text Answer Bubble -->
       <div class="msg-bubble" id="live-answer-bubble" style="display: none;">
         <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
       </div>
@@ -464,7 +625,7 @@ function appendTypingBubble() {
 
 function scrollBottom() {
   const c = document.getElementById('messages');
-  c.scrollTop = c.scrollHeight;
+  if (c) c.scrollTop = c.scrollHeight;
 }
 
 /* ── Send message ───────────────────────────────────────────────────────────── */
@@ -472,44 +633,30 @@ function extractThinkAndClean(raw) {
   let clean = '';
   let think = '';
   let currentlyInThink = false;
-
   let pos = 0;
   while (pos < raw.length) {
     if (!currentlyInThink) {
       const startIdx = raw.indexOf('<think>', pos);
-      if (startIdx === -1) {
-        clean += raw.slice(pos);
-        break;
-      } else {
-        clean += raw.slice(pos, startIdx);
-        pos = startIdx + 7;
-        currentlyInThink = true;
-      }
+      if (startIdx === -1) { clean += raw.slice(pos); break; }
+      else { clean += raw.slice(pos, startIdx); pos = startIdx + 7; currentlyInThink = true; }
     } else {
       const endIdx = raw.indexOf('</think>', pos);
-      if (endIdx === -1) {
-        think += raw.slice(pos);
-        break;
-      } else {
-        think += raw.slice(pos, endIdx);
-        pos = endIdx + 8;
-        currentlyInThink = false;
-      }
+      if (endIdx === -1) { think += raw.slice(pos); break; }
+      else { think += raw.slice(pos, endIdx); pos = endIdx + 8; currentlyInThink = false; }
     }
   }
   return { clean, think, currentlyInThink };
 }
 
-async function sendMessage() {
+async function sendMessage(overrideText) {
   if (streaming) return;
   const input = document.getElementById('msg-input');
-  const text = input.value.trim();
+  const text = (overrideText !== undefined ? overrideText : (input ? input.value.trim() : '')).trim();
   if (!text) return;
   if (!currentModel) { toast('Please select a model first', 'err'); return; }
-  if (!currentConvId) newConversation(false);
+  if (!currentConvId) newConversation(true);
 
-  input.value = '';
-  autoResize(input);
+  if (input && overrideText === undefined) { input.value = ''; autoResize(input); }
 
   const conv = conversations.find(c => c.id === currentConvId);
   if (!conv) return;
@@ -519,7 +666,7 @@ async function sendMessage() {
   updateConvTitle(currentConvId, text);
   appendMessage('user', text, true, null, conv.messages.length - 1);
 
-  const typingDiv = appendTypingBubble();
+  appendTypingBubble();
   const actionTickerText = document.getElementById('action-ticker-text');
   const thinkingContainer = document.getElementById('live-thinking-container');
   const thinkingTimerEl = document.getElementById('thinking-timer');
@@ -527,10 +674,11 @@ async function sendMessage() {
   const thinkingScrollBox = document.getElementById('thinking-scroll-box');
   const answerBubble = document.getElementById('live-answer-bubble');
 
-  document.getElementById('send-btn').style.display = 'none';
-  if (document.getElementById('stop-btn')) document.getElementById('stop-btn').style.display = 'flex';
+  const sendBtn = document.getElementById('send-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  if (sendBtn) sendBtn.style.display = 'none';
+  if (stopBtn) stopBtn.style.display = 'flex';
   streaming = true;
-
   activeAbortController = new AbortController();
 
   let totalRawContent = '';
@@ -540,17 +688,13 @@ async function sendMessage() {
   let hasCollapsedThinking = false;
   let streamError = '';
 
-  // Start live thinking timer
   thinkingTimerInterval = setInterval(() => {
     if (thinkingStartTime && thinkingTimerEl) {
       thinkingTimerEl.textContent = ((Date.now() - thinkingStartTime) / 1000).toFixed(1) + 's';
     }
   }, 100);
 
-  // Main Chat uses only the user's conversation-level system prompt. Codebase
-  // context is intentionally reserved for the Evolve App panel.
   const dynamicSystemPrompt = systemPrompt;
-  const enableProviderThinking = false;
 
   try {
     const r = await fetch('/api/chat', {
@@ -559,9 +703,9 @@ async function sendMessage() {
       body: JSON.stringify({
         provider: currentModel.provider,
         model: currentModel.id,
-        messages: conv.messages.slice(0, -1).concat([{ role: 'user', content: text }]),
+        messages: conv.messages,
         systemPrompt: dynamicSystemPrompt,
-        enableThinking: enableProviderThinking
+        enableThinking: false
       }),
       signal: activeAbortController.signal
     });
@@ -577,16 +721,18 @@ async function sendMessage() {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop();
+      buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         try {
           const d = JSON.parse(line.slice(6));
           if (d.error) {
             streamError = d.error;
-            if (actionTickerText) actionTickerText.textContent = '❌ Execution Error';
-            answerBubble.style.display = 'block';
-            answerBubble.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(d.error)}</span>`;
+            if (actionTickerText) actionTickerText.textContent = 'Error';
+            if (answerBubble) {
+              answerBubble.style.display = 'block';
+              answerBubble.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(d.error)}</span>`;
+            }
             scrollBottom();
             break;
           }
@@ -598,45 +744,36 @@ async function sendMessage() {
             saveConversations();
             updateTokenCounterUI();
           }
-
           if (d.reasoning) {
             dedicatedReasoning += d.reasoning;
             if (!thinkingStartTime) thinkingStartTime = Date.now();
           }
-          if (d.text) {
-            totalRawContent += d.text;
-            if (actionTickerText && !totalRawContent) {
-              actionTickerText.textContent = 'RX Stream active. Receiving tokens...';
-            }
-          }
+          if (d.text) totalRawContent += d.text;
 
-          // Compute Think and Clean
           const { clean, think, currentlyInThink } = extractThinkAndClean(totalRawContent);
           const liveThink = (dedicatedReasoning + (think ? '\n' + think : '')).trim();
           const liveClean = clean.trim();
 
-          // Update Thinking UI
           if (liveThink || currentlyInThink) {
             if (!thinkingStartTime) thinkingStartTime = Date.now();
             if (thinkingContainer) thinkingContainer.style.display = 'block';
             if (thinkingContentText) thinkingContentText.textContent = liveThink;
             if (thinkingScrollBox) thinkingScrollBox.scrollTop = thinkingScrollBox.scrollHeight;
-            if (actionTickerText) actionTickerText.textContent = 'ANL Executing: Real-time deeper consideration & analysis...';
+            if (actionTickerText) actionTickerText.textContent = 'Thinking…';
           }
-
-          // Update Clean UI
           if (liveClean || (!currentlyInThink && liveClean.length > 0)) {
-            if (answerBubble) answerBubble.style.display = 'block';
-            if (answerBubble) answerBubble.innerHTML = formatMd(liveClean);
-            if (actionTickerText) actionTickerText.textContent = 'TXT Executing: Formatting final polished Markdown response...';
-
-            // Auto collapse thinking once main answer is smoothly flowing
-            if (thinkingContainer && !currentlyInThink && liveThink && !hasCollapsedThinking && liveClean.length > 30) {
+            if (answerBubble) {
+              answerBubble.style.display = 'block';
+              answerBubble.innerHTML = formatMd(liveClean);
+            }
+            if (actionTickerText) actionTickerText.textContent = 'Writing…';
+            scrollBottom();
+            if (thinkingContainer && !currentlyInThink && liveThink && !hasCollapsedThinking && liveClean.length > 40) {
               thinkingContainer.classList.add('collapsed');
               hasCollapsedThinking = true;
             }
           }
-        } catch { /* skip partial json */ }
+        } catch {}
       }
       if (streamError) break;
     }
@@ -644,21 +781,19 @@ async function sendMessage() {
     if (e.name === 'AbortError') {
       streamError = 'Stopped by user';
     } else {
-      if (actionTickerText) actionTickerText.textContent = '❌ Network Connection Error';
-      answerBubble.style.display = 'block';
-      answerBubble.innerHTML = `<span style="color:var(--red)">Network error: ${escHtml(e.message)}</span>`;
+      if (actionTickerText) actionTickerText.textContent = 'Network error';
+      if (answerBubble) {
+        answerBubble.style.display = 'block';
+        answerBubble.innerHTML = `<span style="color:var(--red)">Network error: ${escHtml(e.message)}</span>`;
+      }
       streamError = e.message;
     }
   }
 
-  // Finalize
-  if (thinkingTimerInterval) {
-    clearInterval(thinkingTimerInterval);
-    thinkingTimerInterval = null;
-  }
+  if (thinkingTimerInterval) { clearInterval(thinkingTimerInterval); thinkingTimerInterval = null; }
   const thinkingFinalDuration = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : 0;
-  if (actionTickerText) actionTickerText.textContent = '✅ Action completed successfully';
-  setTimeout(() => { document.getElementById('live-action-ticker')?.remove(); }, 1200);
+  if (actionTickerText) actionTickerText.textContent = 'Done';
+  setTimeout(() => { document.getElementById('live-action-ticker')?.remove(); }, 900);
 
   const { clean: finalCleanParsed, think: finalThinkParsed } = extractThinkAndClean(totalRawContent);
   const finalLiveThink = (dedicatedReasoning + (finalThinkParsed ? '\n' + finalThinkParsed : '')).trim();
@@ -669,15 +804,12 @@ async function sendMessage() {
   } else if (streamError && !finalLiveClean) {
     finalLiveClean = '[Error: ' + streamError + ']';
   } else if (!finalLiveClean && finalLiveThink) {
-    finalLiveClean = '*[Chain of Thought completed. No final summary provided]*';
+    finalLiveClean = '*[No final answer provided]*';
   }
 
   const modelInfo = { ...currentModel };
   const modelObj = models.find(m => m.id === currentModel.id && m.provider === currentModel.provider);
-  if (modelObj) {
-    modelInfo.icon = modelObj.icon || '';
-    modelInfo.name = modelObj.name || modelObj.id;
-  }
+  if (modelObj) { modelInfo.icon = modelObj.icon || ''; modelInfo.name = modelObj.name || modelObj.id; }
 
   const finalMsgObj = {
     role: 'assistant',
@@ -693,11 +825,17 @@ async function sendMessage() {
   const newBubble = appendMessage('assistant', finalMsgObj.content, false, modelInfo, conv.messages.length - 1, finalMsgObj.thinking, finalMsgObj.thinkingTime);
   document.getElementById('active-assistant-message')?.replaceWith(newBubble);
 
-  document.getElementById('send-btn').style.display = 'flex';
-  if (document.getElementById('stop-btn')) document.getElementById('stop-btn').style.display = 'none';
-  document.getElementById('send-btn').disabled = false;
-  streaming = false;
+  setStreamingUI(false);
   activeAbortController = null;
+}
+
+function setStreamingUI(isStreaming) {
+  streaming = isStreaming;
+  const sendBtn = document.getElementById('send-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  if (sendBtn) sendBtn.style.display = isStreaming ? 'none' : 'flex';
+  if (stopBtn) stopBtn.style.display = isStreaming ? 'flex' : 'none';
+  if (sendBtn) sendBtn.disabled = false;
 }
 
 /* ── Evolve App ─────────────────────────────────────────────────────────────── */
@@ -730,7 +868,7 @@ function populateEvolveModelSelect() {
   const targetModels = showAll ? models : models.filter(m => m.updateCapable);
   sel.innerHTML = '';
   if (targetModels.length === 0) {
-    sel.innerHTML = '<option value="" style="background: #1e2030; color: #ffffff;">— No capable models available (Add keys in Settings) —</option>';
+    sel.innerHTML = '<option value="">— No capable models available —</option>';
     return;
   }
   const groups = {};
@@ -741,17 +879,10 @@ function populateEvolveModelSelect() {
   for (const [prov, ms] of Object.entries(groups)) {
     const og = document.createElement('optgroup');
     og.label = providerLabel(prov);
-    og.style.background = '#11131d';
-    og.style.color = '#a5b4fc';
-    og.style.fontWeight = '700';
     for (const m of ms) {
       const opt = document.createElement('option');
       opt.value = JSON.stringify({ id: m.id, provider: m.provider });
-      opt.textContent = `${m.icon || ''} ${m.name}${m.updateCapable ? '' : ' (⚠️ May struggle)'}`;
-      opt.style.background = '#1e2030';
-      opt.style.color = '#ffffff';
-      opt.style.padding = '6px';
-      opt.style.fontWeight = '600';
+      opt.textContent = `${m.icon || ''} ${m.name}${m.updateCapable ? '' : ' (⚠️)'}`;
       og.appendChild(opt);
     }
     sel.appendChild(og);
@@ -789,27 +920,26 @@ function renderFileTreeNodes(nodes, container, level) {
     div.className = 'evolve-tree-item';
     div.style.paddingLeft = (level * 14 + 6) + 'px';
     if (node.type === 'dir') {
-      div.className += ' evolve-tree-dir';
-      div.innerHTML = `<span>DIR</span> <span>${escHtml(node.path)}</span>`;
+      div.classList.add('evolve-tree-dir');
+      div.textContent = 'DIR ' + node.path;
       const childContainer = document.createElement('div');
       childContainer.className = 'evolve-tree-children';
-      childContainer.style.display = 'block';
-      div.onclick = (e) => {
+      div.addEventListener('click', (e) => {
         e.stopPropagation();
         childContainer.style.display = childContainer.style.display === 'none' ? 'block' : 'none';
-      };
+      });
       container.appendChild(div);
       container.appendChild(childContainer);
       renderFileTreeNodes(node.children, childContainer, level + 1);
     } else {
-      div.className += ' evolve-tree-file';
-      div.innerHTML = `<span>FILE</span> <span>${escHtml(node.path)}</span>`;
-      div.onclick = (e) => {
+      div.classList.add('evolve-tree-file');
+      div.textContent = 'FILE ' + node.path;
+      div.addEventListener('click', (e) => {
         e.stopPropagation();
         showFileViewer(node.path, node.content);
         document.querySelectorAll('.evolve-tree-file').forEach(el => el.classList.remove('active'));
         div.classList.add('active');
-      };
+      });
       container.appendChild(div);
     }
   }
@@ -818,20 +948,16 @@ function renderFileTreeNodes(nodes, container, level) {
 function showFileViewer(path, content) {
   const viewer = document.getElementById('evolve-file-viewer');
   if (!viewer) return;
-  viewer.innerHTML = `<div id="evolve-file-viewer-title" style="font-weight:600;margin-bottom:6px;color:var(--accent2);">${escHtml(path)}</div><pre style="margin:0;white-space:pre-wrap;word-break:break-word;">${escHtml(content)}</pre>`;
+  viewer.innerHTML = `<div class="evolve-file-viewer-title">${escHtml(path)}</div><pre>${escHtml(content)}</pre>`;
   viewer.style.display = 'block';
 }
 
 const MAX_EVOLVE_MSGS = 200;
 function saveEvolveMessages() {
   try {
-    while (evolveMessages.length > MAX_EVOLVE_MSGS) {
-      evolveMessages.shift();
-    }
+    while (evolveMessages.length > MAX_EVOLVE_MSGS) evolveMessages.shift();
     localStorage.setItem('evolveMessages', JSON.stringify(evolveMessages));
-  } catch(e) {
-    toast('Could not save Evolve chat locally: ' + e.message, 'err');
-  }
+  } catch(e) { toast('Could not save Evolve chat locally: ' + e.message, 'err'); }
 }
 
 function renderEvolveMessages() {
@@ -841,7 +967,7 @@ function renderEvolveMessages() {
   if (!Array.isArray(evolveMessages) || evolveMessages.length === 0) {
     container.innerHTML = `
       <div class="evolve-empty-state" id="evolve-empty-state">
-        <div class="hero">⬡</div>
+        <div class="hero" aria-hidden="true">⬡</div>
         <h3>Plan safe app improvements</h3>
         <p>Select an Evolve model below, describe one clear change, review the generated plan, then approve it to execute.</p>
       </div>`;
@@ -877,23 +1003,17 @@ function appendEvolveMessage(role, content) {
 
   const bubble = document.createElement('div');
   bubble.className = 'evolve-msg-bubble';
-  bubble.style.maxWidth = '100%';
 
   let cleanContent = content;
   let foundPlans = [];
-
-  // Extract and remove plan blocks from the rendered text so they don't show as raw JSON
   if (role === 'assistant') {
     const planRegex = /\n?\n?```plan\s*([\s\S]*?)```/g;
     let match;
     while ((match = planRegex.exec(content)) !== null) {
       try {
         const parsed = JSON.parse(match[1]);
-        if (Array.isArray(parsed)) {
-          foundPlans.push(parsed);
-          cleanContent = cleanContent.replace(match[0], '');
-        }
-      } catch { /* ignore invalid */ }
+        if (Array.isArray(parsed)) { foundPlans.push(parsed); cleanContent = cleanContent.replace(match[0], ''); }
+      } catch {}
     }
     cleanContent = cleanContent.trim();
   }
@@ -906,7 +1026,7 @@ function appendEvolveMessage(role, content) {
   const copyBtn = document.createElement('button');
   copyBtn.className = 'evolve-msg-action-btn';
   copyBtn.type = 'button';
-  copyBtn.innerHTML = 'COPY';
+  copyBtn.textContent = 'COPY';
   copyBtn.addEventListener('click', () => copyTextToClipboard(content, copyBtn));
   actions.appendChild(copyBtn);
   bubbleWrap.appendChild(actions);
@@ -915,12 +1035,8 @@ function appendEvolveMessage(role, content) {
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 
-  // Render plan cards separately after the message
-  for (const plan of foundPlans) {
-    renderPlanInChat(plan);
-  }
+  for (const plan of foundPlans) renderPlanInChat(plan);
 }
-
 
 function planStateKey(plan) {
   const raw = JSON.stringify(plan || []);
@@ -928,40 +1044,26 @@ function planStateKey(plan) {
   for (let i = 0; i < raw.length; i++) hash = ((hash << 5) - hash + raw.charCodeAt(i)) | 0;
   return 'plan-' + Math.abs(hash).toString(36);
 }
-
-function saveEvolvePlanStates() {
-  localStorage.setItem('evolvePlanStates', JSON.stringify(evolvePlanStates));
-}
-
-function setPlanState(planKey, status, note = '') {
-  evolvePlanStates[planKey] = { status, note, updated: Date.now() };
-  saveEvolvePlanStates();
-}
-
+function saveEvolvePlanStates() { localStorage.setItem('evolvePlanStates', JSON.stringify(evolvePlanStates)); }
+function setPlanState(planKey, status, note = '') { evolvePlanStates[planKey] = { status, note, updated: Date.now() }; saveEvolvePlanStates(); }
 function setPlanCardStatus(planId, status, note) {
   const card = document.querySelector(`[data-plan-id="${planId}"]`);
   if (!card) return;
   const actions = card.querySelector('.evolve-plan-actions');
   if (actions) actions.remove();
   let statusEl = card.querySelector('.evolve-plan-status');
-  if (!statusEl) {
-    statusEl = document.createElement('div');
-    statusEl.className = 'evolve-plan-status';
-    card.appendChild(statusEl);
-  }
+  if (!statusEl) { statusEl = document.createElement('div'); statusEl.className = 'evolve-plan-status'; card.appendChild(statusEl); }
   statusEl.textContent = note || status;
   statusEl.dataset.status = status;
 }
-
 function rejectPlan(planId) {
   const plan = window._evolvePlans?.[planId];
   if (!plan) return;
   const key = planStateKey(plan);
   setPlanState(key, 'rejected', 'Plan rejected by user.');
   setPlanCardStatus(planId, 'rejected', 'REJECTED — this plan will not be executed.');
-  addEvolveMessage('assistant', 'Plan rejected by user. I will treat that plan as cancelled. Tell me what to change, or ask for a revised plan.');
+  addEvolveMessage('assistant', 'Plan rejected. Tell me what to change, or ask for a revised plan.');
 }
-
 
 function renderInvestigationPrompt(failedPayload, appliedPayload) {
   const container = document.getElementById('evolve-messages');
@@ -970,39 +1072,21 @@ function renderInvestigationPrompt(failedPayload, appliedPayload) {
   div.className = 'evolve-msg assistant';
   div.innerHTML = `<div class="evolve-msg-bubble">
     <div style="font-weight:700;color:var(--yellow);margin-bottom:8px;">INVESTIGATION REQUIRED</div>
-    <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">Some files failed while others were applied. Continue only if you want a diagnostic pass and a new repair plan for the failed files.</div>
+    <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">Some files failed while others were applied.</div>
     <button class="btn-primary" onclick="requestFailedPlanRetry('${failedPayload}', '${appliedPayload}')">INVESTIGATE FAILED EDITS</button>
   </div>`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
-
 function requestFailedPlanRetry(encodedFailed, encodedApplied) {
-  let failed = [];
-  let applied = [];
-  try { failed = JSON.parse(decodeURIComponent(encodedFailed)); } catch { /* ignore */ }
-  try { applied = JSON.parse(decodeURIComponent(encodedApplied)); } catch { /* ignore */ }
-  const failedList = failed.map(f => `- ${f.path}: ${f.error}`).join('\n') || '- Unknown failed file';
+  let failed = [], applied = [];
+  try { failed = JSON.parse(decodeURIComponent(encodedFailed)); } catch {}
+  try { applied = JSON.parse(decodeURIComponent(encodedApplied)); } catch {}
+  const failedList = failed.map(f => `- ${f.path}: ${f.error}`).join('\n') || '- Unknown';
   const appliedList = applied.map(f => `- ${f.action?.toUpperCase?.() || 'UPDATE'} ${f.path}`).join('\n') || '- None';
-  const prompt = `Please investigate the partial Evolve execution and propose a new minimal plan ONLY for the failed file(s).
-
-Already applied successfully:
-${appliedList}
-
-Failed file(s):
-${failedList}
-
-First explain why the failed edit likely failed, then provide a revised plan for only the failed work.`;
+  const prompt = `Please investigate the partial Evolve execution and propose a new minimal plan ONLY for the failed file(s).\n\nAlready applied:\n${appliedList}\n\nFailed:\n${failedList}\n\nExplain why the failed edit likely failed, then provide a revised plan.`;
   const input = document.getElementById('evolve-input');
-  if (input) {
-    input.value = prompt;
-    autoResize(input);
-    input.focus();
-    toast('Investigation prompt queued — sending now', 'ok');
-    setTimeout(() => sendEvolveMessage(), 50);
-  } else {
-    toast('Could not find Evolve input', 'err');
-  }
+  if (input) { input.value = prompt; autoResize(input); input.focus(); toast('Investigation prompt queued', 'ok'); setTimeout(() => sendEvolveMessage(), 50); }
 }
 
 function renderPlanInChat(plan) {
@@ -1026,9 +1110,9 @@ function renderPlanInChat(plan) {
   div.innerHTML = `<div class="evolve-msg-bubble" data-plan-id="${planId}">
     <div style="font-weight:600;margin-bottom:10px;font-size:14px;color:var(--accent2);">PROPOSED PLAN</div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;">
-      Review the changes below. If they look correct, click <strong style="color:var(--text);">APPROVE & EXECUTE</strong> to start the live code generation.
+      Review the changes below. Click <strong style="color:var(--text);">APPROVE & EXECUTE</strong> to start.
     </div>
-    ${plan.map((p, i) => `
+    ${plan.map(p => `
       <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
           <span style="font-size:11px;color:var(--yellow);font-weight:600;text-transform:uppercase;">${escHtml(p.action || 'edit')}</span>
@@ -1044,10 +1128,7 @@ function renderPlanInChat(plan) {
 }
 
 function clearEvolveChat() {
-  if (evolveStreaming) {
-    toast('Stop the active Evolve run before clearing the chat', 'err');
-    return;
-  }
+  if (evolveStreaming) { toast('Stop the active Evolve run before clearing', 'err'); return; }
   if (evolveMessages.length && !confirm('Clear the Evolve chat and start a new update thread?')) return;
   evolveMessages = [];
   if (window._evolvePlans) window._evolvePlans = {};
@@ -1057,36 +1138,31 @@ function clearEvolveChat() {
   renderEvolveMessages();
 }
 
-
-
 async function sendEvolveMessage() {
   if (evolveStreaming) return;
   const input = document.getElementById('evolve-input');
+  if (!input) return;
   const text = input.value.trim();
   if (!text) return;
   const model = getEvolveModel();
   if (!model) { toast('Please select a model in the Evolve panel', 'err'); return; }
 
-  input.value = '';
-  autoResize(input);
+  input.value = ''; autoResize(input);
 
-  // Auto-execute: if user types approval phrases and there's a pending plan, execute it directly
   const approvalPhrases = ['proceed', 'do it', 'make the edit', 'execute', 'go ahead', 'yes', 'approve', 'please proceed', 'make it', 'implement it'];
   const lowerText = text.toLowerCase();
   const pendingPlanIds = Object.keys(window._evolvePlans || {});
   if (pendingPlanIds.length > 0 && approvalPhrases.some(p => lowerText.includes(p))) {
     const latestPlanId = pendingPlanIds[pendingPlanIds.length - 1];
     addEvolveMessage('user', text);
-    addEvolveMessage('assistant', 'ACK Executing your approved plan now...');
+    addEvolveMessage('assistant', 'Executing your approved plan now…');
     approvePlan(latestPlanId);
     return;
   }
 
   addEvolveMessage('user', text);
-
   const modelObj = models.find(m => m.id === model.id && m.provider === model.provider);
   const modelName = modelObj ? `${modelObj.icon || ''} ${modelObj.name || model.id}` : model.id;
-
   appendEvolveLoading(modelName);
 
   evolveStreaming = true;
@@ -1094,9 +1170,7 @@ async function sendEvolveMessage() {
   setEvolveStreamingUI(true);
 
   let dynamicSystem = EVOLVE_SYSTEM_PROMPT;
-  if (appManifestString) {
-    dynamicSystem = dynamicSystem + '\n\n' + appManifestString;
-  }
+  if (appManifestString) dynamicSystem = dynamicSystem + '\n\n' + appManifestString;
 
   try {
     const r = await fetch('/api/chat', {
@@ -1124,23 +1198,16 @@ async function sendEvolveMessage() {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop();
+      buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         try {
           const d = JSON.parse(line.slice(6));
-          if (d.error) {
-            assistantText += '\n[Error: ' + d.error + ']';
-            break;
-          }
-          if (d.text) {
-            assistantText += d.text;
-            updateEvolveLoading(assistantText);
-          }
-        } catch { /* skip */ }
+          if (d.error) { assistantText += '\n[Error: ' + d.error + ']'; break; }
+          if (d.text) { assistantText += d.text; updateEvolveLoading(assistantText); }
+        } catch {}
       }
     }
-
     removeEvolveLoading();
     addEvolveMessage('assistant', assistantText);
   } catch (e) {
@@ -1160,30 +1227,18 @@ function appendEvolveLoading(modelName) {
   const div = document.createElement('div');
   div.className = 'evolve-msg assistant';
   div.id = 'evolve-loading-msg';
-  div.innerHTML = `<div class="evolve-msg-bubble"><div class="action-ticker"><span class="ticker-spinner">⚙️</span><span>${escHtml(modelName)} is thinking...</span></div></div>`;
+  div.innerHTML = `<div class="evolve-msg-bubble"><div class="action-ticker"><span class="ticker-spinner">⚙️</span><span>${escHtml(modelName)} is thinking…</span></div></div>`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
-
 function updateEvolveLoading(text) {
   const div = document.getElementById('evolve-loading-msg');
   if (!div) return;
   const bubble = div.querySelector('.evolve-msg-bubble');
   if (bubble) bubble.innerHTML = formatMd(text);
 }
-
-function removeEvolveLoading() {
-  const div = document.getElementById('evolve-loading-msg');
-  if (div) div.remove();
-}
-
-function stopEvolveMessage() {
-  if (evolveAbortController) {
-    evolveAbortController.abort();
-    evolveAbortController = null;
-  }
-}
-
+function removeEvolveLoading() { document.getElementById('evolve-loading-msg')?.remove(); }
+function stopEvolveMessage() { if (evolveAbortController) { evolveAbortController.abort(); evolveAbortController = null; } }
 function setEvolveStreamingUI(isStreaming) {
   const sendBtn = document.getElementById('evolve-send-btn');
   const stopBtn = document.getElementById('evolve-stop-btn');
@@ -1199,27 +1254,21 @@ async function approvePlan(planId) {
   const plan = window._evolvePlans?.[planId];
   if (!plan) { toast('Plan not found', 'err'); return; }
   const key = planStateKey(plan);
-  const btn = document.querySelector(`[onclick*="approvePlan('${planId}')"]`);
   const model = getEvolveModel();
   if (!model) { toast('Please select a model first', 'err'); return; }
-  setPlanState(key, 'executing', 'EXECUTING...');
-  setPlanCardStatus(planId, 'executing', 'EXECUTING...');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'EXECUTING...';
-  }
+  setPlanState(key, 'executing', 'EXECUTING…');
+  setPlanCardStatus(planId, 'executing', 'EXECUTING…');
 
   const container = document.getElementById('evolve-messages');
   const div = document.createElement('div');
   div.className = 'evolve-msg assistant';
   div.id = 'evolve-execution-' + planId;
   div.innerHTML = `<div class="evolve-msg-bubble">
-    <div style="color:var(--accent2);font-weight:600;margin-bottom:8px;">EXECUTION STARTED...</div>
+    <div style="color:var(--accent2);font-weight:600;margin-bottom:8px;">EXECUTION STARTED…</div>
     <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:400px;overflow-y:auto;font-family:var(--font-mono);font-size:12px;white-space:pre-wrap;word-break:break-word;" id="exec-feed-${planId}"></pre>
   </div>`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
-
   const feed = document.getElementById('exec-feed-' + planId);
 
   try {
@@ -1229,95 +1278,82 @@ async function approvePlan(planId) {
       body: JSON.stringify({ provider: model.provider, model: model.id, plan })
     });
     if (!r.ok) throw new Error(await apiErrorMessage(r, 'Execution failed'));
-
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop();
+      buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         try {
           const d = JSON.parse(line.slice(6));
-          if (d.type === 'chunk') {
-            feed.textContent += d.text;
-            feed.scrollTop = feed.scrollHeight;
-          } else if (d.type === 'backup') {
-            feed.textContent += `\n[Backup created: ${d.dir}]\n`;
-            feed.scrollTop = feed.scrollHeight;
-          } else if (d.type === 'file_complete') {
-            feed.textContent += `\n[✅ ${d.action.toUpperCase()} ${d.path}]\n`;
-            feed.scrollTop = feed.scrollHeight;
-          } else if (d.type === 'file_error') {
-            feed.textContent += `\n[❌ ERROR ${d.path}: ${d.error}]\n`;
-            feed.scrollTop = feed.scrollHeight;
-          } else if (d.type === 'done' || d.type === 'partial') {
-            feed.textContent += `\n\n${d.type === 'partial' ? 'PARTIAL: ' : 'OK '}${d.message}`;
-            feed.scrollTop = feed.scrollHeight;
+          if (d.type === 'chunk') { feed.textContent += d.text; feed.scrollTop = feed.scrollHeight; }
+          else if (d.type === 'backup') { feed.textContent += `\n[Backup: ${d.dir}]\n`; feed.scrollTop = feed.scrollHeight; }
+          else if (d.type === 'file_complete') { feed.textContent += `\n[✅ ${d.action.toUpperCase()} ${d.path}]\n`; feed.scrollTop = feed.scrollHeight; }
+          else if (d.type === 'file_error') { feed.textContent += `\n[❌ ${d.path}: ${d.error}]\n`; feed.scrollTop = feed.scrollHeight; }
+          else if (d.type === 'done' || d.type === 'partial') {
+            feed.textContent += `\n\n${d.type === 'partial' ? 'PARTIAL: ' : ''}${d.message}`;
             const applied = Array.isArray(d.applied) ? d.applied : [];
             const failed = Array.isArray(d.failed) ? d.failed : [];
-            const appliedList = applied.length
-              ? applied.map(f => `- ${f.action?.toUpperCase?.() || 'UPDATE'} ${f.path}`).join('\n')
-              : '- None';
-            const failedList = failed.length
-              ? failed.map(f => `- ${f.path}: ${f.error}`).join('\n')
-              : '- None';
-
+            const appliedList = applied.length ? applied.map(f => `- ${f.action?.toUpperCase?.() || 'UPDATE'} ${f.path}`).join('\n') : '- None';
+            const failedList = failed.length ? failed.map(f => `- ${f.path}: ${f.error}`).join('\n') : '- None';
             if (d.type === 'partial') {
-              toast('Partial update: investigation required', 'err');
-              setPlanState(key, 'partial', 'PARTIAL — some files failed. Investigation required.');
-              setPlanCardStatus(planId, 'partial', 'PARTIAL — some files failed. Investigation required.');
-              const failedPayload = encodeURIComponent(JSON.stringify(failed));
-              const appliedPayload = encodeURIComponent(JSON.stringify(applied));
-              addEvolveMessage('assistant', `Partial execution — this update is NOT fully complete.\n\n${d.message}\n\nApplied files:\n${appliedList}\n\nFailed files:\n${failedList}\n\nBackup: ${d.backupDir || 'not reported'}\n\nClick the investigation button below if you want me to diagnose the failed file(s) and propose a new minimal repair plan.`);
-              renderInvestigationPrompt(failedPayload, appliedPayload);
+              toast('Partial update', 'err');
+              setPlanState(key, 'partial', 'PARTIAL — investigation required');
+              setPlanCardStatus(planId, 'partial', 'PARTIAL — investigation required');
+              addEvolveMessage('assistant', `Partial execution.\n\n${d.message}\n\nApplied:\n${appliedList}\n\nFailed:\n${failedList}\n\nBackup: ${d.backupDir || 'n/a'}`);
+              renderInvestigationPrompt(encodeURIComponent(JSON.stringify(failed)), encodeURIComponent(JSON.stringify(applied)));
             } else {
               toast(d.message, 'ok');
-              setPlanState(key, 'executed', 'EXECUTED — plan completed.');
-              setPlanCardStatus(planId, 'executed', 'EXECUTED — plan completed.');
-              addEvolveMessage('assistant', `Execution complete.\n\n${d.message}\n\nApplied files:\n${appliedList}\n\nBackup: ${d.backupDir || 'not reported'}\n\nIf you do not see the change after reload, ask me here and I can inspect the updated codebase context with this execution record.`);
+              setPlanState(key, 'executed', 'EXECUTED');
+              setPlanCardStatus(planId, 'executed', 'EXECUTED');
+              addEvolveMessage('assistant', `Execution complete.\n\nApplied:\n${appliedList}\n\nBackup: ${d.backupDir || 'n/a'}`);
             }
             loadFileTree();
           } else if (d.type === 'error') {
             feed.textContent += `\n\nERROR: ${d.message}`;
-            feed.scrollTop = feed.scrollHeight;
-            setPlanState(key, 'failed', 'FAILED — execution did not complete.');
-            setPlanCardStatus(planId, 'failed', 'FAILED — execution did not complete.');
-            addEvolveMessage('assistant', `Execution failed.\n\n${d.message}\n\nYou can ask me to diagnose the failure from this same Evolve thread.`);
+            setPlanState(key, 'failed', 'FAILED');
+            setPlanCardStatus(planId, 'failed', 'FAILED');
+            addEvolveMessage('assistant', `Execution failed.\n\n${d.message}`);
             toast(d.message, 'err');
           }
-        } catch { /* skip */ }
+        } catch {}
       }
     }
   } catch (e) {
-    feed.textContent += `\n\nFailed: ${e.message}`;
-    setPlanState(key, 'failed', 'FAILED — execution request failed.');
-    setPlanCardStatus(planId, 'failed', 'FAILED — execution request failed.');
-    addEvolveMessage('assistant', `Execution request failed.\n\n${e.message}\n\nYou can ask me to diagnose the failure from this same Evolve thread.`);
+    if (feed) feed.textContent += `\n\nFailed: ${e.message}`;
+    setPlanState(key, 'failed', 'FAILED');
+    setPlanCardStatus(planId, 'failed', 'FAILED');
+    addEvolveMessage('assistant', `Execution request failed.\n\n${e.message}`);
     toast('Execution failed: ' + e.message, 'err');
   }
 }
 
-/* ── System prompt ──────────────────────────────────────────────────────────── */
+/* ── System prompt modal ───────────────────────────────────────────────────── */
 function openSystemModal() {
-  document.getElementById('system-prompt-input').value = systemPrompt;
-  document.getElementById('modal-overlay').classList.add('open');
+  const inp = document.getElementById('system-prompt-input');
+  if (inp) inp.value = systemPrompt;
+  const overlay = document.getElementById('modal-overlay');
+  if (overlay) { overlay.classList.add('open'); overlay.style.display = 'flex'; setTimeout(() => inp?.focus(), 30); }
 }
-function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); }
+function closeModal() {
+  const overlay = document.getElementById('modal-overlay');
+  if (overlay) { overlay.classList.remove('open'); overlay.style.display = 'none'; }
+}
 function closeModalOutside(e) { if (e.target === document.getElementById('modal-overlay')) closeModal(); }
 function saveSystemPrompt() {
-  systemPrompt = document.getElementById('system-prompt-input').value.trim();
+  const inp = document.getElementById('system-prompt-input');
+  systemPrompt = inp ? inp.value.trim() : '';
   localStorage.setItem('systemPrompt', systemPrompt);
   closeModal();
   toast('System prompt saved ✓', 'ok');
 }
 
-/* ── Custom Interactive Actions (Copy, Edit, Regenerate, Stop) ──────────── */
+/* ── Message actions ───────────────────────────────────────────────────────── */
 function toggleThinking(el) {
   const container = el.closest('.thinking-container');
   if (!container) return;
@@ -1329,6 +1365,7 @@ function stopGenerating() {
     activeAbortController.abort();
     activeAbortController = null;
   }
+  setStreamingUI(false);
 }
 
 function clearCurrentChat() {
@@ -1336,7 +1373,6 @@ function clearCurrentChat() {
   const conv = conversations.find(c => c.id === currentConvId);
   if (!conv) return;
   if (!confirm('Clear all messages in this conversation?')) return;
-
   conv.messages = [];
   conv.title = 'New chat';
   if (conv.tokenUsage) conv.tokenUsage = { prompt: 0, completion: 0, total: 0 };
@@ -1350,17 +1386,12 @@ function clearCurrentChat() {
 function exportCurrentChat() {
   if (!currentConvId) return;
   const conv = conversations.find(c => c.id === currentConvId);
-  if (!conv || conv.messages.length === 0) {
-    toast('Nothing to export', 'err');
-    return;
-  }
-
+  if (!conv || conv.messages.length === 0) { toast('Nothing to export', 'err'); return; }
   let md = `# ${conv.title}\nExported on ${new Date().toLocaleString()}\n\n`;
   for (const m of conv.messages) {
     const roleName = m.role === 'user' ? 'User' : 'Assistant';
     md += `### ${roleName}\n${m.content}\n\n---\n\n`;
   }
-
   const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1372,12 +1403,7 @@ function exportCurrentChat() {
 }
 
 function exportAllData() {
-  const data = {
-    version: 1,
-    exportDate: new Date().toISOString(),
-    conversations,
-    systemPrompt: localStorage.getItem('systemPrompt') || ''
-  };
+  const data = { version: 1, exportDate: new Date().toISOString(), conversations, systemPrompt: localStorage.getItem('systemPrompt') || '' };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1385,7 +1411,7 @@ function exportAllData() {
   a.download = `aichat_backup_${new Date().toISOString().replace(/[:.]/g, '')}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  toast('Data exported successfully ✓', 'ok');
+  toast('Data exported ✓', 'ok');
 }
 
 function importAllData(e) {
@@ -1395,22 +1421,18 @@ function importAllData(e) {
   reader.onload = (evt) => {
     try {
       const data = JSON.parse(evt.target.result);
-      if (data.conversations && Array.isArray(data.conversations)) {
-        conversations = data.conversations;
-        saveConversations();
-      }
+      if (data.conversations && Array.isArray(data.conversations)) { conversations = data.conversations; saveConversations(); }
       if (typeof data.systemPrompt === 'string') {
         systemPrompt = data.systemPrompt;
         localStorage.setItem('systemPrompt', systemPrompt);
-        document.getElementById('system-prompt-input').value = systemPrompt;
+        const si = document.getElementById('system-prompt-input');
+        if (si) si.value = systemPrompt;
       }
       renderConvList();
       if (conversations.length > 0) loadConversation(conversations[0].id);
       else newConversation(true);
-      toast('Data restored successfully ✓', 'ok');
-    } catch(err) {
-      toast('Failed to restore data: invalid JSON', 'err');
-    }
+      toast('Data restored ✓', 'ok');
+    } catch(err) { toast('Failed to restore data: invalid JSON', 'err'); }
     e.target.value = '';
   };
   reader.readAsText(file);
@@ -1420,12 +1442,9 @@ function editMsgAction(idx) {
   const conv = conversations.find(c => c.id === currentConvId);
   if (!conv || !conv.messages[idx]) return;
   const targetMsg = conv.messages[idx];
-
-  if (confirm('Edit this message and re-send? (Later messages in this chat will be replaced)')) {
-    document.getElementById('msg-input').value = targetMsg.content;
-    autoResize(document.getElementById('msg-input'));
-    document.getElementById('msg-input').focus();
-
+  if (confirm('Edit this message and re-send? Later messages will be replaced.')) {
+    const input = document.getElementById('msg-input');
+    if (input) { input.value = targetMsg.content; autoResize(input); input.focus(); }
     conv.messages = conv.messages.slice(0, idx);
     saveConversations();
     renderMessages(conv.messages);
@@ -1438,148 +1457,91 @@ async function copyMsgAction(idx, btn) {
   if (!conv || !conv.messages[idx]) return;
   try {
     await navigator.clipboard.writeText(conv.messages[idx].content);
-    const orig = btn.innerHTML;
-    btn.innerHTML = '✓ Copied';
-    btn.style.color = 'var(--green)';
-    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
-  } catch(err) {
-    toast('Copy failed', 'err');
-  }
+    flashCopied(btn);
+  } catch { toast('Copy failed', 'err'); }
 }
 
 function regenMsgAction(idx) {
   const conv = conversations.find(c => c.id === currentConvId);
   if (!conv || !conv.messages[idx]) return;
-
-  if (confirm('Regenerate this assistant response?')) {
-    conv.messages = conv.messages.slice(0, idx);
+  if (!confirm('Regenerate this assistant response?')) return;
+  conv.messages = conv.messages.slice(0, idx);
+  saveConversations();
+  renderMessages(conv.messages);
+  updateTokenCounterUI();
+  const lastUserMsg = conv.messages[conv.messages.length - 1];
+  if (lastUserMsg && lastUserMsg.role === 'user') {
+    const textToResend = lastUserMsg.content;
+    conv.messages.pop();
     saveConversations();
-    renderMessages(conv.messages);
-    updateTokenCounterUI();
-
-    const lastUserMsg = conv.messages[conv.messages.length - 1];
-    if (lastUserMsg && lastUserMsg.role === 'user') {
-      const textToResend = lastUserMsg.content;
-      conv.messages.pop();
-      document.getElementById('msg-input').value = textToResend;
-      sendMessage();
-    }
+    sendMessage(textToResend);
   }
 }
 
 async function copyCode(btn, e) {
   if (e) e.stopPropagation();
-  const pre = btn.closest('.code-block').querySelector('pre code');
+  const pre = btn.closest('.code-block')?.querySelector('pre code');
   if (!pre) return;
-  try {
-    await navigator.clipboard.writeText(pre.textContent);
-    const orig = btn.innerHTML;
-    btn.innerHTML = '✓ Copied';
-    btn.style.color = 'var(--green)';
-    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
-  } catch(err) {
-    toast('Copy failed', 'err');
-  }
+  try { await navigator.clipboard.writeText(pre.textContent); flashCopied(btn); }
+  catch { toast('Copy failed', 'err'); }
+}
+
+function flashCopied(btn) {
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.textContent = '✓ Copied';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1800);
 }
 
 /* ── Input helpers ──────────────────────────────────────────────────────────── */
 function onInputKey(e) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 }
 function onEvolveInputKey(e) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendEvolveMessage(); }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendEvolveMessage(); }
 }
 async function copyTextToClipboard(text, btn) {
-  try {
-    await navigator.clipboard.writeText(text || '');
-    if (btn) {
-      const orig = btn.innerHTML;
-      btn.innerHTML = '✓ Copied';
-      btn.style.color = 'var(--green)';
-      setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 2000);
-    }
-  } catch {
-    toast('Copy failed', 'err');
-  }
+  try { await navigator.clipboard.writeText(text || ''); if (btn) flashCopied(btn); }
+  catch { toast('Copy failed', 'err'); }
 }
 function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 160) + 'px';
 }
 function insertSuggestion(el) {
-  document.getElementById('msg-input').value = el.textContent;
-  autoResize(document.getElementById('msg-input'));
-  document.getElementById('msg-input').focus();
+  const input = document.getElementById('msg-input');
+  if (!input) return;
+  input.value = el.textContent;
+  autoResize(input);
+  input.focus();
 }
 
 /* ── Toast ──────────────────────────────────────────────────────────────────── */
 let toastTimer;
 function toast(msg, type = 'ok') {
   const el = document.getElementById('toast');
+  if (!el) return;
   el.textContent = msg;
   el.className = `show ${type}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.className = ''; }, 3000);
 }
 
+/* ── Utils ─────────────────────────────────────────────────────────────────── */
 function loadStoredJson(key, fallback) {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
-    return parsed ?? fallback;
-  } catch (e) {
-    console.warn('[storage] Failed to parse', key, e.message);
-    localStorage.removeItem(key);
-    return fallback;
-  }
+  try { const parsed = JSON.parse(localStorage.getItem(key) || 'null'); return parsed ?? fallback; }
+  catch (e) { console.warn('[storage] Failed to parse', key, e.message); localStorage.removeItem(key); return fallback; }
 }
-
 async function apiErrorMessage(response, fallback) {
-  try {
-    const data = await response.json();
-    return data.error || data.message || fallback;
-  } catch {
-    try { return await response.text() || fallback; }
-    catch { return fallback; }
-  }
+  try { const data = await response.json(); return data.error || data.message || fallback; }
+  catch { try { return await response.text() || fallback; } catch { return fallback; } }
 }
-
-/* ── Markdown renderer (lightweight) ───────────────────────────────────────── */
-function formatMd(text) {
-  let h = escHtml(text);
-  // Code blocks
-  h = h.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
-    const cleanLang = escHtml(lang || 'code');
-    const cleanCode = code.trim();
-    return `<div class="code-block"><div class="code-header"><span>${cleanLang}</span><button class="copy-code-btn" onclick="copyCode(this, event)">COPY</button></div><pre><code>${cleanCode}</code></pre></div>`;
-  });
-  // Inline code
-  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
-  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Italic
-  h = h.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  // Headings
-  h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  h = h.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  h = h.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Bullet lists
-  h = h.replace(/^\s*[-*•] (.+)$/gm, '<li>$1</li>');
-  h = h.replace(/(<li>.*<\/li>(\n|$))+/g, m => `<ul>${m}</ul>`);
-  // Numbered lists
-  h = h.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-  // Paragraphs (double newlines)
-  h = h.split(/\n{2,}/).map(block => {
-    if (/^<(h[123]|ul|ol|pre|li)/.test(block.trim())) return block;
-    return `<p>${block.replace(/\n/g, '<br/>')}</p>`;
-  }).join('');
-  return h;
-}
-
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-/* ── App Manifest (Evolve panel codebase context only) ─────────────────────── */
+/* ── App Manifest ──────────────────────────────────────────────────────────── */
 async function loadAppManifest() {
   try {
     const r = await fetch('/api/manifest');
@@ -1592,23 +1554,19 @@ async function loadAppManifest() {
     appManifestString = '';
   }
 }
-
 function renderManifestAsPrompt(m) {
   if (!m) return '';
   const lines = [];
   lines.push('=== APP MANIFEST ===');
   lines.push(`You are embedded inside the running app "${m.name}" (${m.description || ''}, v${m.version}).`);
   lines.push('You have READ-ONLY awareness of the codebase via the structured manifest below.');
-  lines.push('Use it to: answer "is X possible?", recommend features, audit the design, and — once a feature is agreed — output a fenced code block tagged ```plan containing a JSON array of proposed actions: {path, action, description}.');
   lines.push('');
   lines.push('--- TECH STACK ---');
   (m.techStack || []).forEach(t => lines.push('• ' + t));
   lines.push(`Port: ${m.port}`);
   lines.push('');
   lines.push('--- STORAGE ---');
-  if (m.storage) {
-    Object.entries(m.storage).forEach(([k, v]) => lines.push(`• ${k}: ${v}`));
-  }
+  if (m.storage) Object.entries(m.storage).forEach(([k, v]) => lines.push(`• ${k}: ${v}`));
   lines.push('');
   lines.push('--- FILES (line counts only) ---');
   (m.files || []).forEach(f => lines.push(`• ${f.path}  (${f.lines} lines)`));
@@ -1618,13 +1576,11 @@ function renderManifestAsPrompt(m) {
   lines.push('');
   lines.push('--- FRONTEND ---');
   if (m.frontend) {
-    lines.push(`Frontend files: public/index.html (~${m.frontend.lineCount} lines), public/styles.css (~${m.frontend.styleLineCount || 0} lines), public/app.js (~${m.frontend.scriptLineCount || 0} lines).`);
+    lines.push(`Frontend: public/index.html (~${m.frontend.lineCount} lines), public/styles.css (~${m.frontend.styleLineCount || 0}), public/app.js (~${m.frontend.scriptLineCount || 0})`);
     lines.push(`Panels: ${(m.frontend.panels || []).join(', ')}`);
-    lines.push(`Key selectors: ${(m.frontend.keySelectors || []).join(', ')}`);
-    lines.push(`Notable JS functions: ${(m.frontend.functions || []).slice(0, 30).join(', ')}${(m.frontend.functions || []).length > 30 ? ' …' : ''}`);
   }
   lines.push('');
-  lines.push('--- CAPABILITIES (what this app can already do) ---');
+  lines.push('--- CAPABILITIES ---');
   (m.capabilities || []).forEach(c => lines.push('✓ ' + c));
   lines.push('');
   lines.push('--- HARD CONSTRAINTS ---');
@@ -1633,21 +1589,11 @@ function renderManifestAsPrompt(m) {
   lines.push('--- HOW UPDATES WORK ---');
   (m.updateWorkflow || []).forEach(s => lines.push(s));
   lines.push('');
-  lines.push('--- HOW TO WRITE A GREAT PLAN ---');
   if (m.updatePromptGuide) {
+    lines.push('--- HOW TO WRITE A GREAT PLAN ---');
     (m.updatePromptGuide.what_makes_a_great_prompt || []).forEach(t => lines.push('• ' + t));
-    lines.push('');
-    lines.push('Format convention: ' + (m.updatePromptGuide.format || ''));
-    lines.push('');
-    lines.push('Example of a great plan:');
-    lines.push('```plan');
-    lines.push(JSON.stringify([
-      { path: 'public/hello.md', action: 'create', description: 'Add a Hello World markdown file' },
-      { path: 'server.js', action: 'edit', description: 'Add a route to serve the new file' }
-    ], null, 2));
-    lines.push('```');
+    lines.push(''); lines.push('Format: ' + (m.updatePromptGuide.format || ''));
   }
-  lines.push('');
-  lines.push('=== END APP MANIFEST ===');
+  lines.push(''); lines.push('=== END APP MANIFEST ===');
   return lines.join('\n');
 }

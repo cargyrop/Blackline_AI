@@ -3,15 +3,21 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="dark" />
+<meta name="description" content="BLACKLINE AI — Local-first multi-provider chat app with self-evolution. Chat with Claude, GPT, Gemini, Groq, DeepSeek, and local Ollama models, all on your machine." />
+<meta name="theme-color" content="#050608" />
 <title>BLACKLINE AI</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='6' fill='%23050608'/%3E%3Crect x='10' y='10' width='44' height='44' fill='none' stroke='%2300f0ff' stroke-width='2'/%3E%3Crect x='20' y='26' width='24' height='12' fill='%2300f0ff'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/styles.css" />
-
+<link rel="stylesheet" href="/vendor/highlight-github-dark.min.css">
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/marked.min.js"></script>
 </head>
 <body>
 
 <div id="app">
   <!-- ── Sidebar ───────────────────────────────────────────────────────────── -->
-  <div id="sidebar">
+  <aside id="sidebar" aria-label="Conversations">
     <div id="sidebar-header">
       <span class="logo" aria-label="BLACKLINE AI logo">
         <svg viewBox="0 0 64 64" role="img" aria-hidden="true">
@@ -25,90 +31,97 @@
         <span>Local-first · Multi-provider</span>
       </div>
     </div>
-    <nav id="sidebar-nav">
+    <nav id="sidebar-nav" aria-label="Main navigation">
       <button class="nav-btn active" data-panel="chat" onclick="showPanel('chat')">
-        <span class="icon">◧</span> Chat
+        <span class="icon" aria-hidden="true">◧</span> Chat
       </button>
       <button class="nav-btn" data-panel="settings" onclick="showPanel('settings')">
-        <span class="icon">◫</span> API Keys & Models
+        <span class="icon" aria-hidden="true">◫</span> API Keys & Models
       </button>
       <button class="nav-btn" data-panel="evolve" onclick="showPanel('evolve')">
-        <span class="icon">⬡</span> Evolve App
+        <span class="icon" aria-hidden="true">⬡</span> Evolve App
       </button>
     </nav>
     <div id="conversations">
       <h3>Conversations</h3>
-      <div id="conv-list"></div>
+      <div class="conv-search-wrap">
+        <input type="text" id="conv-search" placeholder="Filter…" aria-label="Filter conversations"
+          oninput="filterConversations(this.value)">
+        <button class="conv-search-clear" onclick="clearConvSearch()" aria-label="Clear filter" title="Clear">×</button>
+      </div>
+      <div id="conv-list" role="list"></div>
     </div>
     <button id="new-chat-btn" onclick="newConversation()">+ New chat</button>
-  </div>
+  </aside>
 
   <!-- ── Main ─────────────────────────────────────────────────────────────── -->
-  <div id="main">
+  <main id="main">
     <!-- Toolbar -->
     <div id="toolbar">
-      <select id="model-select" onchange="onModelChange()">
+      <label class="sr-only" for="model-select">Model</label>
+      <select id="model-select" onchange="onModelChange()" aria-label="Select AI model">
         <option value="">— No models yet. Add an API key in Settings —</option>
       </select>
       <button id="refresh-btn" onclick="loadModels()" title="Refresh model list">⟳ Refresh</button>
       <button id="system-btn" onclick="openSystemModal()">System Prompt</button>
       <button class="toolbar-action-btn" onclick="clearCurrentChat()" title="Clear active chat messages">CLEAR</button>
       <button class="toolbar-action-btn" onclick="exportCurrentChat()" title="Export chat to Markdown">EXPORT</button>
-      <span class="model-count" id="model-count"></span>
-      <!-- Token counter badge -->
-      <div id="token-counter-badge" title="Tokens spent in this conversation (Prompt in / Completion out)" style="display: flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; font-size: 11px; color: var(--text-muted); font-weight: 600;">
+      <span class="model-count" id="model-count" aria-live="polite"></span>
+      <div id="token-counter-badge" class="token-badge" title="Tokens spent in this conversation (Prompt in / Completion out)">
         <span id="token-count-text">Tokens: 0</span>
       </div>
     </div>
 
     <!-- Chat panel -->
-    <div class="panel visible" id="chat-panel">
-      <div id="messages">
+    <div class="panel visible" id="chat-panel" role="region" aria-label="Chat">
+      <div id="messages" role="log" aria-live="polite" aria-atomic="false">
         <div id="empty-state">
-          <div class="hero">▰</div>
+          <div class="hero" aria-hidden="true">▰</div>
           <h2>Ready to chat</h2>
           <p>Select a model, then send a message. Add API keys in Settings to unlock cloud providers.</p>
           <div class="suggestions">
-            <div class="suggestion" onclick="insertSuggestion(this)">Explain quantum computing</div>
-            <div class="suggestion" onclick="insertSuggestion(this)">Write a Python script</div>
-            <div class="suggestion" onclick="insertSuggestion(this)">Summarize a concept</div>
-            <div class="suggestion" onclick="insertSuggestion(this)">Debug my code</div>
+            <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Explain quantum computing</div>
+            <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Write a Python script</div>
+            <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Summarize a concept</div>
+            <div class="suggestion" onclick="insertSuggestion(this)" role="button" tabindex="0">Debug my code</div>
           </div>
         </div>
       </div>
       <div id="input-area">
         <div id="input-row">
-          <textarea id="msg-input" rows="1" placeholder="Transmit a message…" onkeydown="onInputKey(event)" oninput="autoResize(this)"></textarea>
-          <button id="send-btn" onclick="sendMessage()" title="Send (Ctrl+Enter)">
-            <span>Send</span> <span style="font-size:16px">↑</span>
+          <label class="sr-only" for="msg-input">Message</label>
+          <textarea id="msg-input" rows="1" placeholder="Transmit a message… (Enter to send, Shift+Enter for newline)"
+            onkeydown="onInputKey(event)" oninput="autoResize(this)"></textarea>
+          <button id="send-btn" onclick="sendMessage()" title="Send (Enter)">
+            <span>Send</span> <span aria-hidden="true" style="font-size:16px">↑</span>
           </button>
-          <button id="stop-btn" onclick="stopGenerating()" title="Stop generating" style="display:none; background: var(--red); border: none; color: white; padding: 10px 18px; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.15s; flex-shrink: 0; align-items: center; gap: 6px; height: 42px;">
-            <span>Stop</span> <span style="font-size:14px">■</span>
+          <button id="stop-btn" class="btn-stop" onclick="stopGenerating()" title="Stop generating" style="display:none">
+            <span>Stop</span> <span aria-hidden="true" style="font-size:14px">■</span>
           </button>
         </div>
         <div id="input-meta">
-          <span class="kbd">Ctrl</span><span style="font-size:10px;color:var(--text-dim)">+</span><span class="kbd">Enter</span>
-          <span style="font-size:11px;color:var(--text-dim)">to send</span>
+          <span class="kbd">Enter</span>
+          <span class="input-meta-hint">to send · Shift+Enter for newline</span>
         </div>
       </div>
     </div>
 
     <!-- Settings panel -->
-    <div class="panel" id="settings-panel">
+    <div class="panel" id="settings-panel" role="region" aria-label="Settings">
       <div class="settings-section">
         <h2>Data Backup & Restore</h2>
         <p>Save all your local conversations and settings to a JSON backup file, or restore them from an existing file.</p>
-        <div style="display:flex; gap: 12px; align-items: center;">
+        <div class="inline-flex-gap">
           <button class="btn-primary" onclick="exportAllData()">EXPORT All Data</button>
-          <label class="btn-secondary" style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
-            <input type="file" id="import-data-file" accept=".json" style="display:none" onchange="importAllData(event)">
+          <label class="btn-secondary file-label">
+            <input type="file" id="import-data-file" accept=".json" onchange="importAllData(event)">
             <span>IMPORT Data</span>
           </label>
         </div>
       </div>
       <div class="settings-section">
         <h2>API Keys</h2>
-        <p>Your keys are stored locally in <code style="color:var(--accent2);font-family:var(--font-mono)">data/config.json</code> — never sent anywhere except the respective provider's API.</p>
+        <p>Your keys are stored locally in <code class="accent-code">data/config.json</code> — never sent anywhere except the respective provider's API.</p>
         <div id="keys-list"></div>
       </div>
       <div class="settings-section">
@@ -121,10 +134,10 @@
           3. Ollama runs automatically in the background<br/>
           4. Click <strong>Refresh Models</strong> below — your local models will appear
         </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <div class="inline-flex-gap wrap">
           <button class="btn-secondary" onclick="loadModels()">Refresh Models</button>
           <div class="ollama-status">
-            <div class="status-dot" id="ollama-dot"></div>
+            <div class="status-dot" id="ollama-dot" aria-hidden="true"></div>
             <span id="ollama-status-text">Checking Ollama...</span>
           </div>
         </div>
@@ -132,7 +145,7 @@
     </div>
 
     <!-- Evolve panel -->
-    <div class="panel" id="evolve-panel">
+    <div class="panel" id="evolve-panel" role="region" aria-label="Evolve App">
       <div class="evolve-layout">
         <div class="evolve-left">
           <div class="evolve-chat-header">
@@ -144,53 +157,56 @@
               <button onclick="clearEvolveChat()" title="Clear Evolve conversation and start a new update thread">New Update</button>
             </div>
           </div>
-          <div id="evolve-messages" class="evolve-messages">
+          <div id="evolve-messages" class="evolve-messages" role="log" aria-live="polite">
             <div class="evolve-empty-state" id="evolve-empty-state">
-              <div class="hero">⬡</div>
+              <div class="hero" aria-hidden="true">⬡</div>
               <h3>Plan safe app improvements</h3>
               <p>Select an Evolve model below, describe one clear change, review the generated plan, then approve it to execute.</p>
             </div>
           </div>
           <div class="evolve-input-area">
             <div class="evolve-model-bar">
-              <label>Model:</label>
-              <select id="evolve-model-select"></select>
-              <label style="font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;">
+              <label for="evolve-model-select">Model:</label>
+              <select id="evolve-model-select" aria-label="Evolve model"></select>
+              <label class="evolve-show-all">
                 <input type="checkbox" id="show-all-evolve-models" onchange="populateEvolveModelSelect()"> Show all
               </label>
             </div>
             <div class="evolve-input-row">
-              <textarea id="evolve-input" rows="1" placeholder="Ask about the codebase or request a feature..." onkeydown="onEvolveInputKey(event)" oninput="autoResize(this)"></textarea>
-              <button id="evolve-send-btn" class="evolve-send-btn" onclick="sendEvolveMessage()" title="Send (Ctrl+Enter)">Send <span style="font-size:16px">↑</span></button>
-              <button id="evolve-stop-btn" class="evolve-stop-btn" onclick="stopEvolveMessage()" title="Stop generating">Stop <span style="font-size:14px">■</span></button>
+              <label class="sr-only" for="evolve-input">Evolve message</label>
+              <textarea id="evolve-input" rows="1" placeholder="Ask about the codebase or request a feature… (Enter to send, Shift+Enter for newline)" onkeydown="onEvolveInputKey(event)" oninput="autoResize(this)"></textarea>
+              <button id="evolve-send-btn" class="evolve-send-btn" onclick="sendEvolveMessage()" title="Send (Enter)">Send <span aria-hidden="true" style="font-size:16px">↑</span></button>
+              <button id="evolve-stop-btn" class="evolve-stop-btn" onclick="stopEvolveMessage()" title="Stop generating">Stop <span aria-hidden="true" style="font-size:14px">■</span></button>
             </div>
             <div class="evolve-input-meta">
-              <span class="kbd">Ctrl</span><span>+</span><span class="kbd">Enter</span><span>to send</span>
+              <span class="kbd">Enter</span><span>to send · Shift+Enter for newline</span>
             </div>
           </div>
         </div>
-        <div id="evolve-resizer" class="evolve-resizer" title="Drag to resize codebase panel"></div>
+        <div id="evolve-resizer" class="evolve-resizer" title="Drag to resize codebase panel" aria-hidden="true"></div>
         <div class="evolve-right">
           <div class="evolve-section codebase-section">
-            <h3 style="justify-content:space-between;">
+            <h3 class="evolve-section-header">
               <span>CODEBASE</span>
               <button class="evolve-mini-btn" onclick="loadFileTree()" title="Refresh codebase tree">REFRESH</button>
             </h3>
-            <div id="evolve-file-tree" class="evolve-file-tree"></div>
-            <div id="evolve-file-viewer" class="evolve-file-viewer" style="display:none;">
-              <div id="evolve-file-viewer-title" style="font-weight:600;margin-bottom:6px;color:var(--accent2);"></div>
+            <div id="evolve-file-tree" class="evolve-file-tree" role="tree"></div>
+            <div id="evolve-file-viewer" class="evolve-file-viewer" style="display:none;" role="region" aria-label="File viewer">
+              <div id="evolve-file-viewer-title" class="evolve-file-viewer-title"></div>
             </div>
           </div>
         </div>
       </div>
-
     </div>
+  </main><!-- /#main -->
+</div><!-- /#app -->
 
 <!-- System prompt modal -->
-<div id="modal-overlay" onclick="closeModalOutside(event)">
-  <div id="system-modal">
-    <h3>SYSTEM PROMPT</h3>
+<div id="modal-overlay" onclick="closeModalOutside(event)" role="dialog" aria-modal="true" aria-labelledby="system-modal-title" style="display:none">
+  <div id="system-modal" role="document">
+    <h3 id="system-modal-title">SYSTEM PROMPT</h3>
     <p>Sets the AI's persona or instructions for this conversation. Applied to new conversations.</p>
+    <label class="sr-only" for="system-prompt-input">System prompt</label>
     <textarea id="system-prompt-input" placeholder="You are a helpful assistant..."></textarea>
     <div class="modal-btns">
       <button class="btn-secondary" onclick="closeModal()">Cancel</button>
@@ -200,7 +216,7 @@
 </div>
 
 <!-- Toast -->
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script src="/app.js"></script>
 </body>
