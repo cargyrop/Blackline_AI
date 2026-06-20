@@ -186,7 +186,7 @@ async function buildKeysList() {
   try {
     const r = await fetch('/api/keys');
     if (r.ok) savedKeys = await r.json();
-  } catch { /* ignore */ }
+  } catch (e) { console.warn('[keys] Failed to load keys:', e.message); }
 
   container.innerHTML = '';
   for (const p of PROVIDERS) {
@@ -298,9 +298,18 @@ function deleteConversation(id, e) {
   }
 }
 
+const MAX_CONVERSATIONS = 50;
 function saveConversations() {
   try {
-    localStorage.setItem('conversations', JSON.stringify(conversations));
+    while (conversations.length > MAX_CONVERSATIONS) {
+      conversations.pop();
+    }
+    const serialized = JSON.stringify(conversations);
+    const sizeBytes = new Blob([serialized]).size;
+    if (sizeBytes > 4 * 1024 * 1024) {
+      console.warn('[storage] Conversations size:', (sizeBytes / 1024 / 1024).toFixed(1), 'MB - near localStorage limit');
+    }
+    localStorage.setItem('conversations', serialized);
   } catch(e) {
     toast('Could not save conversations locally: ' + e.message, 'err');
   }
@@ -813,8 +822,12 @@ function showFileViewer(path, content) {
   viewer.style.display = 'block';
 }
 
+const MAX_EVOLVE_MSGS = 200;
 function saveEvolveMessages() {
   try {
+    while (evolveMessages.length > MAX_EVOLVE_MSGS) {
+      evolveMessages.shift();
+    }
     localStorage.setItem('evolveMessages', JSON.stringify(evolveMessages));
   } catch(e) {
     toast('Could not save Evolve chat locally: ' + e.message, 'err');
@@ -1513,7 +1526,8 @@ function loadStoredJson(key, fallback) {
   try {
     const parsed = JSON.parse(localStorage.getItem(key) || 'null');
     return parsed ?? fallback;
-  } catch {
+  } catch (e) {
+    console.warn('[storage] Failed to parse', key, e.message);
     localStorage.removeItem(key);
     return fallback;
   }

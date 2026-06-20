@@ -5,10 +5,47 @@ const path = require('path');
 const { exec } = require('child_process');
 
 const app = express();
-const PORT = 3737;
+const PORT = parseInt(process.env.PORT, 10) || 3737;
 const DATA_FILE = path.join(__dirname, 'data', 'config.json');
 const EVOLVE_EXECUTION_TIMEOUT_MS = 15 * 60 * 1000; // Large plans (docs/wiki files) can exceed five minutes.
 const ALLOWED_PROVIDERS = new Set(['anthropic', 'openai', 'gemini', 'groq', 'openrouter', 'deepseek']);
+
+// ── Simple in-memory rate limiter ────────────────────────────────────
+const rateLimitBuckets = new Map();
+function rateLimiter(windowMs, max) {
+  windowMs = windowMs || 60000;
+  max = max || 100;
+  return function rateLimitMW(req, res, next) {
+    const key = req.ip || req.connection.remoteAddress || 'unknown';
+    const now = Date.now();
+    if (!rateLimitBuckets.has(key)) {
+      rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    const bucket = rateLimitBuckets.get(key);
+    if (now > bucket.resetAt) {
+      bucket.count = 1;
+      bucket.resetAt = now + windowMs;
+      return next();
+    }
+    bucket.count++;
+    if (bucket.count > max) {
+      return res.status(429).json({ error: 'Too many requests. Please wait before trying again.' });
+    }
+    next();
+  };
+}
+
+// ── Security headers middleware ───────────────────────────────────────
+function securityHeaders(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '0');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://*.googleapis.com https://*.anthropic.com https://*.openai.com https://*.groq.com https://*.openrouter.ai https://*.deepseek.com http://localhost:11434; img-src 'self' data:;");
+  next();
+}
+
 const GEMINI_FALLBACK_MODELS = [
   { id: 'gemini-2.0-flash',      name: 'Gemini 2.0 Flash' },
   { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash-Lite' },
@@ -25,6 +62,8 @@ app.use(cors({
     cb(new Error('Origin not allowed'));
   },
 }));
+app.use(securityHeaders);
+app.use(rateLimiter(60000, 60));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -127,18 +166,15 @@ app.get('/api/models', async (req, res) => {
   const keys = cfg.keys || {};
   const models = [];
 
-  // Helper to determine if a model is capable of self-updating (~70KB code / structured JSON)
+  // Determine if a model is capable of self-updating (~70KB code / structured JSON)
   const isUpdateCapable = (provider, id, name = '') => {
     const full = `${id} ${name}`.toLowerCase();
-    // Evolve to empower any capable/modern AI provider model
-    if (provider === 'gemini') return true;
-    if (provider === 'anthropic') return true;
+    if (provider === 'gemini' || provider === 'anthropic' || provider === 'deepseek') return true;
     if (provider === 'openai') return /gpt-4|o1|o3|gpt-4\.5/i.test(full);
     if (provider === 'groq') return /70b|deepseek|3\.3|mixtral/i.test(full);
     if (provider === 'openrouter') return /sonnet|opus|gpt-4|o1|o3|gemini|70b|405b|deepseek|coder/i.test(full);
     if (provider === 'ollama') return /70b|deepseek|qwen|coder|llama3\.3|phi4/i.test(full);
-    if (provider === 'deepseek') return true;
-    return true;
+    return false;
   };
 
   // Anthropic
