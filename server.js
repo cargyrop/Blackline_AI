@@ -385,11 +385,7 @@ app.get('/api/models', async (req, res) => {
 });
 
 // -- Chat ----------------------------------------------------------------------
-app.post('/api/chat', async (req, res) => {
-  const { provider, model, systemPrompt } = req.body;
-  const messages = sanitizeMessages(req.body.messages);
-  const safeSystemPrompt = typeof systemPrompt === 'string' ? systemPrompt.slice(0, 200000) : '';
-  const cfg = loadConfig();
+app.post("/api/chat", async (req, res) => {
   const keys = cfg.keys || {};
 
   if (!['anthropic', 'openai', 'gemini', 'groq', 'openrouter', 'ollama', 'deepseek'].includes(provider)) {
@@ -437,8 +433,10 @@ app.post('/api/chat', async (req, res) => {
       const body = {
         model,
         max_tokens: req.body.enableThinking ? 8192 : 4096,
+        temperature: req.body.temperature ?? 0.7,
+        top_p: req.body.top_p ?? 1.0,
         stream: true,
-        messages: messages.filter(m => m.role !== 'system'),
+        messages: finalMessages.filter(m => m.role !== 'system'),
       };
       if (req.body.enableThinking && /sonnet-4|3-7-sonnet/.test(model)) {
         body.thinking = { type: 'enabled', budget_tokens: 2000 };
@@ -1139,3 +1137,30 @@ app.listen(PORT, () => {
     exec(cmd, () => {});
   }
 });
+
+/* ── Vision helper (Phase 2) ──────────────────────────────────────────────── */
+function attachVisionContent(messages, images = []) {
+  if (!images.length) return messages;
+
+  return messages.map((msg, index) => {
+    if (index !== messages.length - 1 || msg.role !== 'user') return msg;
+
+    const parts = [];
+    if (typeof msg.content === 'string' && msg.content.trim()) {
+      parts.push({ type: 'text', text: msg.content });
+    }
+
+    for (const img of images) {
+      parts.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: img.mime || 'image/jpeg',
+          data: img.data
+        }
+      });
+    }
+
+    return { ...msg, content: parts.length > 1 ? parts : msg.content };
+  });
+}

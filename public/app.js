@@ -1517,17 +1517,6 @@ function insertSuggestion(el) {
   input.focus();
 }
 
-/* ── Toast ──────────────────────────────────────────────────────────────────── */
-let toastTimer;
-function toast(msg, type = 'ok') {
-  const el = document.getElementById('toast');
-  if (!el) return;
-  el.textContent = msg;
-  el.className = `show ${type}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 3000);
-}
-
 /* ── Utils ─────────────────────────────────────────────────────────────────── */
 function loadStoredJson(key, fallback) {
   try { const parsed = JSON.parse(localStorage.getItem(key) || 'null'); return parsed ?? fallback; }
