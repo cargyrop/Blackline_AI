@@ -59,11 +59,6 @@
   <main id="main">
     <!-- Toolbar -->
     <div id="toolbar">
-      <label class="sr-only" for="model-select">Model</label>
-      <select id="model-select" onchange="onModelChange()" aria-label="Select AI model">
-        <option value="">— No models yet. Add an API key in Settings —</option>
-      </select>
-      <button id="refresh-btn" onclick="loadModels()" title="Refresh model list">⟳ Refresh</button>
       <button id="system-btn" onclick="openSystemModal()">System Prompt</button>
       <button class="toolbar-action-btn" onclick="clearCurrentChat()" title="Clear active chat messages">CLEAR</button>
       <button class="toolbar-action-btn" onclick="exportCurrentChat()" title="Export chat to Markdown">EXPORT</button>
@@ -89,6 +84,12 @@
         </div>
       </div>
       <div id="input-area">
+        <div class="chat-model-bar">
+          <label for="model-select">Model:</label>
+          <select id="model-select" onchange="onModelChange()" aria-label="Select AI model">
+            <option value="">— No models yet. Add an API key in Settings —</option>
+          </select>
+        </div>
         <div id="input-row">
           <label class="sr-only" for="msg-input">Message</label>
           <textarea id="msg-input" rows="1" placeholder="Transmit a message… (Enter to send, Shift+Enter for newline)"
@@ -111,7 +112,7 @@
     <div class="panel" id="settings-panel" role="region" aria-label="Settings">
       <div class="settings-section">
         <h2>Data Backup & Restore</h2>
-        <p>Save all your local conversations and settings to a JSON backup file, or restore them from an existing file.</p>
+        <p>Save your local conversations, system prompt, selected model, Evolve chat, and Evolve layout to a JSON backup file. API keys are intentionally excluded for security and remain only in <code class="accent-code">data/config.json</code>.</p>
         <div class="inline-flex-gap">
           <button class="btn-primary" onclick="exportAllData()">EXPORT All Data</button>
           <label class="btn-secondary file-label">
@@ -124,6 +125,37 @@
         <h2>API Keys</h2>
         <p>Your keys are stored locally in <code class="accent-code">data/config.json</code> — never sent anywhere except the respective provider's API.</p>
         <div id="keys-list"></div>
+      </div>
+      <div class="settings-section">
+        <h2>Model Center</h2>
+        <p>Review discovered models, cost hints, capability signals, Evolve suitability, and live probe status. Provider-listed means the model came from an API/model list; tested means BLACKLINE successfully ran probe prompts against it.</p>
+        <div class="inline-flex-gap wrap model-center-actions">
+          <button id="model-refresh-btn" class="btn-secondary" onclick="loadModels(true)">REFRESH MODEL CATALOG</button>
+          <span class="model-center-note">Refresh re-queries provider model APIs and reapplies BLACKLINE's local metadata and probe cache.</span>
+        </div>
+        <div class="model-center-tabs">
+          <button class="model-center-tab active" data-filter="recommended" onclick="setModelCenterFilter('recommended')">Recommended</button>
+          <button class="model-center-tab" data-filter="all" onclick="setModelCenterFilter('all')">All</button>
+          <button class="model-center-tab" data-filter="free" onclick="setModelCenterFilter('free')">Free / Local</button>
+          <button class="model-center-tab" data-filter="evolve" onclick="setModelCenterFilter('evolve')">Evolve-ready</button>
+          <button class="model-center-tab" data-filter="vision" onclick="setModelCenterFilter('vision')">Vision</button>
+          <button class="model-center-tab" data-filter="tested" onclick="setModelCenterFilter('tested')">Tested</button>
+        </div>
+        <div id="model-center-list" class="model-center-list"></div>
+      </div>
+      <div class="settings-section">
+        <h2>Custom Providers</h2>
+        <p>These presets are OpenAI-compatible endpoints for now: Kimi/Moonshot, Qwen/DashScope compatible mode, Together, Fireworks, Mistral, xAI, LM Studio, vLLM, and llama.cpp. Anthropic, Gemini, OpenRouter, Groq, DeepSeek, and Ollama are handled by their native built-in providers above.</p>
+        <div id="custom-providers-list"></div>
+        <div class="custom-provider-form">
+          <select id="custom-provider-preset" aria-label="Custom provider preset" onchange="applyCustomProviderPreset()">
+            <option value="">Preset…</option>
+          </select>
+          <input id="custom-provider-label" placeholder="Provider name, e.g. Kimi" aria-label="Custom provider name">
+          <input id="custom-provider-base-url" placeholder="Base URL, e.g. https://api.moonshot.ai/v1" aria-label="Custom provider base URL">
+          <input id="custom-provider-key" type="password" placeholder="API key" aria-label="Custom provider API key">
+          <button class="btn-primary" onclick="saveCustomProvider()">ADD PROVIDER</button>
+        </div>
       </div>
       <div class="settings-section">
         <h2>Local Models / Ollama</h2>
@@ -216,9 +248,21 @@
   </div>
 </div>
 
+<!-- Model info modal -->
+<div id="model-info-overlay" onclick="closeModelInfoOutside(event)" role="dialog" aria-modal="true" aria-labelledby="model-info-title" style="display:none">
+  <div id="model-info-modal" role="document">
+    <div class="model-info-header">
+      <h3 id="model-info-title">MODEL INFO</h3>
+      <button class="btn-secondary" onclick="closeModelInfoModal()">Close</button>
+    </div>
+    <div id="model-info-content"></div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast" role="status" aria-live="polite"></div>
 
+<script src="/js/toast.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

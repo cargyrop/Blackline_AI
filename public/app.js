@@ -11,6 +11,9 @@
 
 /* ── State ──────────────────────────────────────────────────────────────────── */
 let models = [];
+let modelProbes = {};
+let modelCenterFilter = 'recommended';
+let customProviderPresets = [];
 let currentModel = loadStoredJson('currentModel', null);
 let conversations = loadStoredJson('conversations', []);
 if (!Array.isArray(conversations)) conversations = [];
@@ -69,6 +72,8 @@ window.addEventListener('DOMContentLoaded', () => {
   renderConvList();
   loadModels();
   buildKeysList();
+  loadCustomProviderPresets();
+  buildCustomProvidersList();
   checkOllama();
   if (systemPrompt) {
     const si = document.getElementById('system-prompt-input');
@@ -97,7 +102,8 @@ window.addEventListener('DOMContentLoaded', () => {
       // close rename input first
       const ren = document.querySelector('.conv-rename-input');
       if (ren) { cancelRenameConversation(); return; }
-      // close system modal
+      // close modals
+      closeModelInfoModal();
       closeModal();
     }
   });
@@ -188,21 +194,32 @@ function showPanel(name) {
 }
 
 /* ── Model loading ──────────────────────────────────────────────────────────── */
-async function loadModels() {
+async function loadModels(showToast = false) {
   const sel = document.getElementById('model-select');
   if (!sel) return;
   const previousVal = sel.value;
+  const refreshBtn = document.getElementById('model-refresh-btn');
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = 'REFRESHING…'; }
+  const center = document.getElementById('model-center-list');
+  if (center && showToast) center.innerHTML = '<div class="model-center-empty">Refreshing provider model catalogs…</div>';
+  if (showToast) toast('Refreshing model catalog…', 'ok');
   sel.innerHTML = '<option value="">Loading models…</option>';
   try {
     const r = await fetch('/api/models');
     if (!r.ok) throw new Error(await apiErrorMessage(r, 'Could not load models'));
     models = await r.json();
     if (!Array.isArray(models)) throw new Error('Model response was not an array');
+    await loadModelProbes();
     populateModelSelect(previousVal);
+    renderModelCenter();
+    buildCustomProvidersList();
     checkOllama();
+    if (showToast) toast(`Model catalog refreshed: ${models.length} model/status entr${models.length === 1 ? 'y' : 'ies'}`, 'ok');
   } catch(e) {
     sel.innerHTML = '<option value="">Error loading models</option>';
     toast('Could not load models: ' + e.message, 'err');
+  } finally {
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'REFRESH MODEL CATALOG'; }
   }
 }
 
@@ -214,15 +231,17 @@ function populateModelSelect(preferredVal) {
 
   populateEvolveModelSelect();
 
-  if (models.length === 0) {
-    sel.innerHTML = '<option value="">— Add an API key in Settings —</option>';
-    if (count) count.textContent = '';
+  const selectableModels = models.filter(isModelSelectable);
+  if (selectableModels.length === 0) {
+    sel.innerHTML = '<option value="">— No tested models yet. Use Model Center → TEST —</option>';
+    if (count) count.textContent = models.length ? 'No tested models' : '';
     currentModel = null;
+    localStorage.removeItem('currentModel');
     return;
   }
 
   const groups = {};
-  for (const m of models) {
+  for (const m of selectableModels) {
     if (!groups[m.provider]) groups[m.provider] = [];
     groups[m.provider].push(m);
   }
@@ -232,12 +251,14 @@ function populateModelSelect(preferredVal) {
     for (const m of ms) {
       const opt = document.createElement('option');
       opt.value = JSON.stringify({ id: m.id, provider: m.provider });
-      opt.textContent = `${m.icon || ''} ${m.name}`;
+      opt.textContent = modelOptionText(m);
+      opt.disabled = !!m.disabled;
+      opt.title = capabilityBadges(m).join(' · ');
       og.appendChild(opt);
     }
     sel.appendChild(og);
   }
-  if (count) count.textContent = `${models.length} model${models.length !== 1 ? 's' : ''}`;
+  if (count) count.textContent = `${selectableModels.length}/${models.length} selectable`;
 
   // restore selection: preferredVal (from reload) > saved currentModel > first
   let toSelect = null;
@@ -250,7 +271,39 @@ function populateModelSelect(preferredVal) {
 }
 
 function providerLabel(p) {
+  if (String(p || '').startsWith('custom:')) {
+    const found = models.find(m => m.provider === p && m.providerName);
+    return found?.providerName || ('Custom: ' + String(p).slice(7));
+  }
   return { anthropic:'Anthropic', openai:'OpenAI', gemini:'Google Gemini', groq:'Groq', openrouter:'OpenRouter', deepseek:'DeepSeek', ollama:'Local (Ollama)' }[p] || p;
+}
+function capabilityBadges(m) {
+  const caps = m.capabilities || {};
+  const pricing = m.pricing?.freeStatus || 'unknown';
+  const badges = [];
+  if (pricing === 'local') badges.push('LOCAL');
+  else if (pricing === 'free') badges.push('FREE');
+  else if (pricing === 'free-tier-or-paid') badges.push('FREE TIER/PAID');
+  else if (pricing === 'paid') badges.push('PAID');
+  else badges.push('UNKNOWN COST');
+  if (caps.imageInput) badges.push('VISION');
+  if (caps.audioInput) badges.push('AUDIO');
+  if (caps.fileInput) badges.push('FILES');
+  if (caps.toolUse) badges.push('TOOLS');
+  if (caps.jsonMode) badges.push('JSON');
+  if (caps.reasoning) badges.push('REASONING');
+  if (m.evolve?.capable || m.updateCapable) badges.push('EVOLVE ' + Math.round(m.evolve?.score || 60));
+  return badges;
+}
+function modelOptionText(m) {
+  return `${m.name || m.id}`;
+}
+function isModelSelectable(m) {
+  const probe = modelProbeFor(m);
+  // Chat/Evolve dropdowns should only contain models that BLACKLINE has actually
+  // verified with a live probe. Untested and failed models remain visible in
+  // Model Center, but are not selectable for chats until they pass or partially pass.
+  return !m.disabled && ['pass', 'partial'].includes(probe?.status);
 }
 
 function onModelChange() {
@@ -321,6 +374,174 @@ async function deleteKey(provider) {
     if (!r.ok) throw new Error(await apiErrorMessage(r, 'Delete failed'));
     toast(`${provider} key removed`, 'ok');
     await buildKeysList();
+    await loadModels();
+  } catch(e) { toast('Delete failed: ' + e.message, 'err'); }
+}
+
+async function loadModelProbes() {
+  try {
+    const r = await fetch('/api/model-probes');
+    if (r.ok) modelProbes = await r.json();
+  } catch { modelProbes = {}; }
+}
+function modelKey(provider, id) { return `${provider}::${id}`; }
+function modelProbeFor(m) { return m.probe || modelProbes[modelKey(m.provider, m.id)] || null; }
+function setModelCenterFilter(filter) { modelCenterFilter = filter; renderModelCenter(); }
+function modelMatchesCenterFilter(m) {
+  const caps = m.capabilities || {};
+  const pricing = m.pricing?.freeStatus;
+  const probe = modelProbeFor(m);
+  if (modelCenterFilter === 'all') return true;
+  if (m.disabled) return modelCenterFilter === 'all';
+  if (modelCenterFilter === 'recommended') return (m.evolve?.score || 0) >= 70 || m.updateCapable;
+  if (modelCenterFilter === 'free') return ['local', 'free', 'free-tier-or-paid'].includes(pricing);
+  if (modelCenterFilter === 'evolve') return !!(m.updateCapable || m.evolve?.capable || probe?.tests?.evolvePlan?.status === 'pass');
+  if (modelCenterFilter === 'vision') return !!caps.imageInput;
+  if (modelCenterFilter === 'tested') return !!probe;
+  return true;
+}
+function renderModelCenter() {
+  const container = document.getElementById('model-center-list');
+  if (!container) return;
+  const filtered = models.filter(m => modelMatchesCenterFilter(m));
+  document.querySelectorAll('.model-center-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === modelCenterFilter));
+  if (!filtered.length) {
+    container.innerHTML = '<div class="model-center-empty">No models in this view. Add an API key, connect Ollama, or choose another filter.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'model-center-table';
+  table.innerHTML = '<thead><tr><th>Model</th><th>Provider</th><th>Cost</th><th>Capabilities</th><th>Evolve</th><th>Probe</th><th></th></tr></thead><tbody></tbody>';
+  const tbody = table.querySelector('tbody');
+  for (const m of filtered) {
+    const tr = document.createElement('tr');
+    const caps = capabilityBadges(m).filter(b => !['PAID','FREE','LOCAL','FREE TIER/PAID','UNKNOWN COST'].includes(b));
+    const pricing = m.pricing?.freeStatus || 'unknown';
+    const probe = modelProbeFor(m);
+    tr.innerHTML = `
+      <td><strong>${escHtml(m.name || m.id)}</strong><span>${escHtml(m.id)}</span></td>
+      <td>${escHtml(providerLabel(m.provider))}</td>
+      <td><span class="model-cost ${escHtml(pricing)}">${escHtml(pricing)}</span></td>
+      <td><div class="mini-badges">${caps.slice(0, 5).map(b => `<span>${escHtml(b)}</span>`).join('')}</div></td>
+      <td>${escHtml(m.evolve?.tier || 'unknown')}<span>${escHtml((m.evolve?.score ?? '?') + '/100')}</span></td>
+      <td>${probe ? `<span class="probe-status ${escHtml(probe.status)}">${escHtml(probe.status)} ${escHtml(String(probe.score ?? '?'))}%</span>` : '<span class="probe-status none">not tested</span>'}</td>
+      <td></td>`;
+    if (m.disabled) tr.classList.add('disabled-model-row');
+    const actions = tr.lastElementChild;
+    const infoBtn = document.createElement('button');
+    infoBtn.className = 'mini-action-btn';
+    infoBtn.textContent = 'INFO';
+    infoBtn.addEventListener('click', () => { currentModel = { id: m.id, provider: m.provider }; openModelInfoModal(); });
+    const testBtn = document.createElement('button');
+    testBtn.className = 'mini-action-btn';
+    testBtn.textContent = 'TEST';
+    testBtn.disabled = !!m.disabled;
+    testBtn.title = m.disabled ? 'Fix provider connection before testing this model.' : 'Run live model probe';
+    testBtn.addEventListener('click', () => probeModel(m, testBtn));
+    actions.append(infoBtn, testBtn);
+    tbody.appendChild(tr);
+  }
+  container.appendChild(table);
+}
+async function probeModel(m, btn) {
+  if (!m || !m.id || !m.provider) return;
+  const old = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = 'TESTING…'; }
+  try {
+    const r = await fetch('/api/models/probe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: m.provider, model: m.id })
+    });
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Probe failed'));
+    const result = await r.json();
+    modelProbes[modelKey(m.provider, m.id)] = result;
+    m.probe = result;
+    toast(`Probe ${result.status}: ${result.score}%`, result.status === 'fail' ? 'err' : 'ok');
+    populateModelSelect();
+    populateEvolveModelSelect();
+    renderModelCenter();
+  } catch(e) { toast('Probe failed: ' + e.message, 'err'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = old || 'TEST'; } }
+}
+
+async function loadCustomProviderPresets() {
+  try {
+    const r = await fetch('/api/custom-provider-presets');
+    if (!r.ok) throw new Error('Could not load presets');
+    customProviderPresets = await r.json();
+    const sel = document.getElementById('custom-provider-preset');
+    if (sel) {
+      sel.innerHTML = '<option value="">Preset…</option>' + customProviderPresets.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.label)}</option>`).join('');
+    }
+  } catch(e) { console.warn('[custom provider presets]', e.message); }
+}
+function applyCustomProviderPreset() {
+  const id = document.getElementById('custom-provider-preset')?.value;
+  const p = customProviderPresets.find(x => x.id === id);
+  if (!p) return;
+  const label = document.getElementById('custom-provider-label');
+  const base = document.getElementById('custom-provider-base-url');
+  if (label) label.value = p.label;
+  if (base) base.value = p.baseUrl;
+}
+
+async function buildCustomProvidersList() {
+  const container = document.getElementById('custom-providers-list');
+  if (!container) return;
+  container.innerHTML = '<div class="custom-provider-empty">Loading custom providers…</div>';
+  try {
+    const r = await fetch('/api/custom-providers');
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Could not load custom providers'));
+    const providers = await r.json();
+    if (!providers.length) {
+      container.innerHTML = '<div class="custom-provider-empty">No custom providers yet.</div>';
+      return;
+    }
+    container.innerHTML = '';
+    for (const p of providers) {
+      const providerId = `custom:${p.id}`;
+      const providerModels = models.filter(m => m.provider === providerId);
+      const listedCount = providerModels.filter(m => !m.disabled).length;
+      const errorEntry = providerModels.find(m => m.disabled);
+      const statusText = errorEntry
+        ? `connection/model-list error: ${errorEntry.name}`
+        : listedCount > 0
+          ? `${listedCount} listed model${listedCount === 1 ? '' : 's'}`
+          : 'not refreshed yet / no listed models';
+      const row = document.createElement('div');
+      row.className = 'custom-provider-row';
+      row.innerHTML = `<div><strong>${escHtml(p.label)}</strong><span>${escHtml(p.baseUrl)} · key ${escHtml(p.keyMasked || 'not set')}</span><span class="custom-provider-status">${escHtml(statusText)}</span></div><button class="delete-key-btn" onclick="deleteCustomProvider('${escHtml(p.id)}')">×</button>`;
+      container.appendChild(row);
+    }
+  } catch(e) {
+    container.innerHTML = `<div class="custom-provider-empty" style="color:var(--red)">${escHtml(e.message)}</div>`;
+  }
+}
+async function saveCustomProvider() {
+  const label = document.getElementById('custom-provider-label')?.value.trim();
+  const baseUrl = document.getElementById('custom-provider-base-url')?.value.trim();
+  const apiKey = document.getElementById('custom-provider-key')?.value.trim();
+  if (!label || !baseUrl || !apiKey) { toast('Provider name, base URL, and API key are required', 'err'); return; }
+  try {
+    const r = await fetch('/api/custom-providers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, baseUrl, apiKey })
+    });
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Could not save provider'));
+    ['custom-provider-label','custom-provider-base-url','custom-provider-key'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    toast('Custom provider saved ✓', 'ok');
+    await buildCustomProvidersList();
+    await loadModels();
+  } catch(e) { toast('Custom provider save failed: ' + e.message, 'err'); }
+}
+async function deleteCustomProvider(id) {
+  if (!confirm('Remove this custom provider?')) return;
+  try {
+    const r = await fetch(`/api/custom-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'Delete failed'));
+    toast('Custom provider removed', 'ok');
+    await buildCustomProvidersList();
     await loadModels();
   } catch(e) { toast('Delete failed: ' + e.message, 'err'); }
 }
@@ -865,7 +1086,8 @@ function populateEvolveModelSelect() {
   if (!sel) return;
   const previousValue = sel.value;
   const showAll = document.getElementById('show-all-evolve-models')?.checked;
-  const targetModels = showAll ? models : models.filter(m => m.updateCapable);
+  const selectableModels = models.filter(isModelSelectable);
+  const targetModels = showAll ? selectableModels : selectableModels.filter(m => m.updateCapable);
   sel.innerHTML = '';
   if (targetModels.length === 0) {
     sel.innerHTML = '<option value="">— No capable models available —</option>';
@@ -882,7 +1104,9 @@ function populateEvolveModelSelect() {
     for (const m of ms) {
       const opt = document.createElement('option');
       opt.value = JSON.stringify({ id: m.id, provider: m.provider });
-      opt.textContent = `${m.icon || ''} ${m.name}${m.updateCapable ? '' : ' (⚠️)'}`;
+      opt.textContent = `${modelOptionText(m)}${m.updateCapable ? '' : ' (not recommended)'}`;
+      opt.disabled = !!m.disabled;
+      opt.title = `Evolve: ${m.evolve?.tier || 'unknown'} (${m.evolve?.score ?? '?'}/100) · ${capabilityBadges(m).join(' · ')}`;
       og.appendChild(opt);
     }
     sel.appendChild(og);
@@ -913,15 +1137,26 @@ async function loadFileTree() {
   }
 }
 
+function fileTreeLabel(fullPath) {
+  const normalized = String(fullPath || '').replace(/\\/g, '/');
+  return normalized.split('/').filter(Boolean).pop() || normalized;
+}
+
 function renderFileTreeNodes(nodes, container, level) {
   if (!Array.isArray(nodes)) return;
   for (const node of nodes) {
+    const normalizedPath = String(node.path || '').replace(/\\/g, '/');
+    node.path = normalizedPath;
+
     const div = document.createElement('div');
     div.className = 'evolve-tree-item';
-    div.style.paddingLeft = (level * 14 + 6) + 'px';
+    if (level === 0) div.classList.add('evolve-tree-root-item');
+    div.style.paddingLeft = (level * 14 + 8) + 'px';
+    div.title = normalizedPath;
+
     if (node.type === 'dir') {
       div.classList.add('evolve-tree-dir');
-      div.textContent = 'DIR ' + node.path;
+      div.innerHTML = `<span class="evolve-tree-icon">DIR</span><span class="evolve-tree-name">${escHtml(fileTreeLabel(normalizedPath))}</span>`;
       const childContainer = document.createElement('div');
       childContainer.className = 'evolve-tree-children';
       div.addEventListener('click', (e) => {
@@ -933,10 +1168,10 @@ function renderFileTreeNodes(nodes, container, level) {
       renderFileTreeNodes(node.children, childContainer, level + 1);
     } else {
       div.classList.add('evolve-tree-file');
-      div.textContent = 'FILE ' + node.path;
+      div.innerHTML = `<span class="evolve-tree-icon">FILE</span><span class="evolve-tree-name">${escHtml(fileTreeLabel(normalizedPath))}</span>`;
       div.addEventListener('click', (e) => {
         e.stopPropagation();
-        showFileViewer(node.path, node.content);
+        showFileViewer(normalizedPath, node.content);
         document.querySelectorAll('.evolve-tree-file').forEach(el => el.classList.remove('active'));
         div.classList.add('active');
       });
@@ -1333,6 +1568,64 @@ async function approvePlan(planId) {
   }
 }
 
+/* ── Model info modal ──────────────────────────────────────────────────────── */
+function currentModelObject() {
+  if (!currentModel) return null;
+  return models.find(m => m.id === currentModel.id && m.provider === currentModel.provider) || currentModel;
+}
+function yesNoBadge(label, value) {
+  return `<span class="model-cap ${value ? 'yes' : 'no'}">${value ? '✓' : '–'} ${escHtml(label)}</span>`;
+}
+function openModelInfoModal() {
+  const overlay = document.getElementById('model-info-overlay');
+  const content = document.getElementById('model-info-content');
+  const m = currentModelObject();
+  if (!overlay || !content) return;
+  if (!m) {
+    content.innerHTML = '<p class="model-info-muted">Select a model first.</p>';
+  } else {
+    const caps = m.capabilities || {};
+    const pricing = m.pricing || {};
+    const evolve = m.evolve || {};
+    const probe = modelProbeFor(m);
+    const probeRows = probe?.tests ? Object.entries(probe.tests).map(([name, t]) =>
+      `<div class="probe-detail-row"><span>${escHtml(name)}</span><strong class="${escHtml(t.status)}">${escHtml(t.status)}</strong><em>${escHtml(t.error || t.detail || '')}</em></div>`
+    ).join('') : '<p class="model-info-muted">Not tested yet. Use TEST in Model Center to verify real access and Evolve behavior.</p>';
+    content.innerHTML = `
+      <div class="model-info-name">${escHtml(m.name || m.id)}</div>
+      <div class="model-info-id">${escHtml(providerLabel(m.provider))} · ${escHtml(m.id)}</div>
+      <div class="model-info-badges">${capabilityBadges(m).map(b => `<span>${escHtml(b)}</span>`).join('')}</div>
+      <h4>Capabilities</h4>
+      <div class="model-cap-grid">
+        ${yesNoBadge('Text', caps.text !== false)}
+        ${yesNoBadge('Vision / image input', caps.imageInput)}
+        ${yesNoBadge('Audio input', caps.audioInput)}
+        ${yesNoBadge('File input', caps.fileInput)}
+        ${yesNoBadge('Tool use', caps.toolUse)}
+        ${yesNoBadge('JSON / structured output', caps.jsonMode)}
+        ${yesNoBadge('Reasoning signal', caps.reasoning)}
+        ${yesNoBadge('Long-context signal', caps.longContext)}
+      </div>
+      <h4>Pricing / availability</h4>
+      <p class="model-info-muted">Status: <strong>${escHtml(pricing.freeStatus || 'unknown')}</strong> · Source: ${escHtml(pricing.source || m.source || 'unknown')}</p>
+      ${pricing.note ? `<p class="model-info-muted">${escHtml(pricing.note)}</p>` : ''}
+      <h4>Evolve suitability</h4>
+      <p class="model-info-muted"><strong>${escHtml(evolve.tier || 'unknown')}</strong> · Score: ${escHtml(evolve.score ?? '?')}/100</p>
+      <div class="model-info-reasons">${(evolve.reasons || []).map(r => `<div>• ${escHtml(r)}</div>`).join('')}</div>
+      <h4>Live probe</h4>
+      <p class="model-info-muted">${probe ? `Status: <strong>${escHtml(probe.status)}</strong> · Score: ${escHtml(probe.score ?? '?')}% · ${escHtml(probe.updatedAt || '')}` : 'Not tested'}</p>
+      <div class="probe-detail-grid">${probeRows}</div>
+      <p class="model-info-warning">Capability and pricing data combine provider model-list APIs, provider metadata where available, BLACKLINE AI local metadata, and optional live probes. Treat pricing as a guide; provider billing pages remain authoritative.</p>`;
+  }
+  overlay.style.display = 'flex';
+  overlay.classList.add('open');
+}
+function closeModelInfoModal() {
+  const overlay = document.getElementById('model-info-overlay');
+  if (overlay) { overlay.classList.remove('open'); overlay.style.display = 'none'; }
+}
+function closeModelInfoOutside(e) { if (e.target === document.getElementById('model-info-overlay')) closeModelInfoModal(); }
+
 /* ── System prompt modal ───────────────────────────────────────────────────── */
 function openSystemModal() {
   const inp = document.getElementById('system-prompt-input');
@@ -1403,15 +1696,38 @@ function exportCurrentChat() {
 }
 
 function exportAllData() {
-  const data = { version: 1, exportDate: new Date().toISOString(), conversations, systemPrompt: localStorage.getItem('systemPrompt') || '' };
+  const data = {
+    app: 'BLACKLINE AI',
+    version: 2,
+    exportDate: new Date().toISOString(),
+    includes: [
+      'conversations',
+      'systemPrompt',
+      'currentModel',
+      'evolveMessages',
+      'evolvePlanStates',
+      'evolveLayout'
+    ],
+    excluded: {
+      apiKeys: 'API keys are intentionally not exported for security. They remain only in data/config.json on this machine.'
+    },
+    conversations,
+    systemPrompt: localStorage.getItem('systemPrompt') || '',
+    currentModel: loadStoredJson('currentModel', null),
+    evolveMessages: loadStoredJson('evolveMessages', []),
+    evolvePlanStates: loadStoredJson('evolvePlanStates', {}),
+    evolveLayout: {
+      leftWidthPct: localStorage.getItem('evolveLeftWidthPct') || null
+    }
+  };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `aichat_backup_${new Date().toISOString().replace(/[:.]/g, '')}.json`;
+  a.download = `blackline_ai_backup_${new Date().toISOString().replace(/[:.]/g, '')}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  toast('Data exported ✓', 'ok');
+  toast('BLACKLINE AI data exported ✓', 'ok');
 }
 
 function importAllData(e) {
@@ -1421,17 +1737,38 @@ function importAllData(e) {
   reader.onload = (evt) => {
     try {
       const data = JSON.parse(evt.target.result);
-      if (data.conversations && Array.isArray(data.conversations)) { conversations = data.conversations; saveConversations(); }
+      if (data.conversations && Array.isArray(data.conversations)) {
+        conversations = data.conversations;
+        saveConversations();
+      }
       if (typeof data.systemPrompt === 'string') {
         systemPrompt = data.systemPrompt;
         localStorage.setItem('systemPrompt', systemPrompt);
         const si = document.getElementById('system-prompt-input');
         if (si) si.value = systemPrompt;
       }
+      if (data.currentModel && typeof data.currentModel === 'object') {
+        currentModel = data.currentModel;
+        localStorage.setItem('currentModel', JSON.stringify(data.currentModel));
+        populateModelSelect(JSON.stringify(data.currentModel));
+      }
+      if (Array.isArray(data.evolveMessages)) {
+        evolveMessages = data.evolveMessages;
+        saveEvolveMessages();
+        renderEvolveMessages();
+      }
+      if (data.evolvePlanStates && typeof data.evolvePlanStates === 'object' && !Array.isArray(data.evolvePlanStates)) {
+        evolvePlanStates = data.evolvePlanStates;
+        localStorage.setItem('evolvePlanStates', JSON.stringify(evolvePlanStates));
+      }
+      if (data.evolveLayout && data.evolveLayout.leftWidthPct !== undefined && data.evolveLayout.leftWidthPct !== null) {
+        localStorage.setItem('evolveLeftWidthPct', String(data.evolveLayout.leftWidthPct));
+        initEvolveResizer();
+      }
       renderConvList();
       if (conversations.length > 0) loadConversation(conversations[0].id);
       else newConversation(true);
-      toast('Data restored ✓', 'ok');
+      toast('BLACKLINE AI data restored ✓', 'ok');
     } catch(err) { toast('Failed to restore data: invalid JSON', 'err'); }
     e.target.value = '';
   };
