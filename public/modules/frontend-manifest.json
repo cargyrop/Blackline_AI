@@ -1,0 +1,131 @@
+{
+  "version": "2.0.0",
+  "modules": {
+    "state": {
+      "path": "public/modules/state.js",
+      "lines": 60,
+      "exports": "Global variables",
+      "dependencies": ["core"],
+      "description": "All mutable global state: models, conversations, currentConvId, evolveMessages, etc. Loaded before all other modules."
+    },
+    "core": {
+      "path": "public/modules/core.js",
+      "lines": 33,
+      "exports": ["loadStoredJson", "escHtml", "autoResize", "flashCopied", "copyTextToClipboard", "apiErrorMessage"],
+      "dependencies": [],
+      "description": "Pure utilities. No DOM, no side effects. Must load before state.js (state.js calls loadStoredJson)."
+    },
+    "toast": {
+      "path": "public/modules/toast.js",
+      "lines": 21,
+      "exports": ["toast", "showNextToast"],
+      "dependencies": ["state"],
+      "domTargets": ["#toast"],
+      "description": "Toast notification queue. Shows one at a time with 2.7s timeout."
+    },
+    "markdown": {
+      "path": "public/modules/markdown.js",
+      "lines": 32,
+      "exports": ["initMarkdown", "formatMd"],
+      "dependencies": ["core"],
+      "description": "Initialize marked.js + highlight.js. formatMd() converts markdown to HTML with code blocks."
+    },
+    "panels": {
+      "path": "public/modules/panels.js",
+      "lines": 93,
+      "exports": ["showPanel", "openSystemModal", "closeModal", "closeModalOutside", "openModelInfoModal", "closeModelInfoModal", "closeModelInfoOutside", "saveSystemPrompt"],
+      "dependencies": ["state"],
+      "domTargets": ["#chat-panel", "#settings-panel", "#evolve-panel", "#modal-overlay", "#model-info-overlay", "#system-prompt-input"],
+      "description": "Panel visibility, modal open/close, system prompt save. showPanel() toggles .visible class on panels."
+    },
+    "models": {
+      "path": "public/modules/models.js",
+      "lines": 349,
+      "exports": ["loadModels", "autoProbeMissingModels", "populateModelSelect", "onModelChange", "providerLabel", "capabilityBadges", "modelOptionText", "isModelSelectable", "modelKey", "modelProbeFor", "setModelCenterFilter", "modelMatchesCenterFilter", "renderModelCenter", "probeModel", "loadCustomProviderPresets", "applyCustomProviderPreset", "loadModelProbes", "populateEvolveModelSelect", "getEvolveModel", "checkOllama", "currentModelObject", "yesNoBadge"],
+      "dependencies": ["state", "core", "toast"],
+      "domTargets": ["#model-select", "#model-center-list", "#evolve-model-select", ".model-center-tabs", "#ollama-status-text", "#ollama-dot"],
+      "description": "Model catalog: fetch from backend, populate selects, render Model Center, run probes, Ollama status check."
+    },
+    "settings": {
+      "path": "public/modules/settings.js",
+      "lines": 123,
+      "exports": ["buildKeysList", "saveKey", "deleteKey", "buildCustomProvidersList", "saveCustomProvider", "deleteCustomProvider"],
+      "dependencies": ["state", "core", "toast", "models"],
+      "domTargets": ["#keys-list", "#custom-providers-list", "#custom-provider-preset", "#custom-provider-label", "#custom-provider-base-url", "#custom-provider-key"],
+      "description": "API key forms, custom provider forms, save/delete keys and providers. Calls loadModels() after key changes."
+    },
+    "conversations": {
+      "path": "public/modules/conversations.js",
+      "lines": 160,
+      "exports": ["newConversation", "loadConversation", "deleteConversation", "saveConversations", "getFilteredConversations", "renderConvList", "filterConversations", "clearConvSearch", "startRenameConversation", "cancelRenameConversation", "updateConvTitle", "updateTokenCounterUI"],
+      "dependencies": ["state", "core", "toast", "chat_render"],
+      "domTargets": ["#conv-list", "#conv-search", "#new-chat-btn", "#token-count-text"],
+      "description": "Conversation CRUD, sidebar rendering, search filter, inline rename, token counter."
+    },
+    "chat_render": {
+      "path": "public/modules/chat_render.js",
+      "lines": 136,
+      "exports": ["renderMessages", "appendMessage", "appendTypingBubble", "scrollBottom", "toggleThinking"],
+      "dependencies": ["state", "core", "markdown"],
+      "domTargets": ["#messages"],
+      "description": "Render chat bubbles, code blocks with copy button, thinking blocks, typing indicator, auto-scroll."
+    },
+    "chat_send": {
+      "path": "public/modules/chat_send.js",
+      "lines": 225,
+      "exports": ["sendMessage", "stopGenerating", "setStreamingUI", "extractThinkAndClean", "onInputKey"],
+      "dependencies": ["state", "core", "toast", "conversations", "chat_render", "models"],
+      "domTargets": ["#msg-input", "#send-btn", "#stop-btn"],
+      "description": "Send user message, POST to /api/chat, handle SSE streaming, append assistant chunks, stop generation, keyboard shortcuts."
+    },
+    "chat_actions": {
+      "path": "public/modules/chat_actions.js",
+      "lines": 91,
+      "exports": ["editMsgAction", "copyMsgAction", "regenMsgAction", "copyCode", "clearCurrentChat", "exportCurrentChat", "insertSuggestion"],
+      "dependencies": ["state", "core", "toast", "conversations", "chat_render", "chat_send"],
+      "domTargets": [".edit-msg", ".copy-msg", ".regen-msg", ".copy-code-btn", "#empty-state"],
+      "description": "Message-level actions: edit, copy, regenerate, clear chat, export to markdown, insert suggestion."
+    },
+    "evolve_tree": {
+      "path": "public/modules/evolve_tree.js",
+      "lines": 111,
+      "exports": ["initEvolveResizer", "loadFileTree", "fileTreeLabel", "renderFileTreeNodes", "showFileViewer"],
+      "dependencies": ["state", "core"],
+      "domTargets": ["#evolve-file-tree", "#evolve-file-viewer", "#evolve-resizer"],
+      "description": "File tree viewer in evolve panel, resizer drag handler, file preview modal."
+    },
+    "evolve_messages": {
+      "path": "public/modules/evolve_messages.js",
+      "lines": 106,
+      "exports": ["addEvolveMessage", "appendEvolveMessage", "appendEvolveLoading", "updateEvolveLoading", "removeEvolveLoading", "renderEvolveMessages", "saveEvolveMessages"],
+      "dependencies": ["state", "core", "markdown"],
+      "domTargets": ["#evolve-messages"],
+      "description": "Render evolve chat bubbles, loading indicators, save message state to localStorage."
+    },
+    "evolve_plan": {
+      "path": "public/modules/evolve_plan.js",
+      "lines": 104,
+      "exports": ["planStateKey", "saveEvolvePlanStates", "setPlanState", "setPlanCardStatus", "rejectPlan", "renderInvestigationPrompt", "requestFailedPlanRetry", "renderPlanInChat"],
+      "dependencies": ["state", "core"],
+      "domTargets": ["#evolve-messages"],
+      "description": "Parse plan JSON blocks, render inline approve/reject buttons, manage plan state, retry failed items."
+    },
+    "evolve_send": {
+      "path": "public/modules/evolve_send.js",
+      "lines": 190,
+      "exports": ["clearEvolveChat", "sendEvolveMessage", "stopEvolveMessage", "setEvolveStreamingUI", "onEvolveInputKey", "approvePlan"],
+      "dependencies": ["state", "core", "toast", "evolve_messages", "evolve_plan", "evolve_tree", "models"],
+      "domTargets": ["#evolve-input", "#evolve-send-btn", "#evolve-stop-btn"],
+      "description": "Send evolve message, POST to /api/chat with system prompt, stream response, handle approve button click, POST to /api/evolve/execute."
+    },
+    "data": {
+      "path": "public/modules/data.js",
+      "lines": 138,
+      "exports": ["exportAllData", "importAllData", "loadAppManifest", "renderManifestAsPrompt"],
+      "dependencies": ["state", "core", "toast", "conversations", "models"],
+      "description": "Import/export JSON backups, load app manifest from /api/manifest, render manifest as text for AI context."
+    }
+  },
+  "loadOrder": ["core", "state", "toast", "markdown", "panels", "models", "settings", "conversations", "chat_render", "chat_send", "chat_actions", "evolve_tree", "evolve_messages", "evolve_plan", "evolve_send", "data"],
+  "domRoots": ["#app", "#sidebar", "#main", "#chat-panel", "#settings-panel", "#evolve-panel", "#modal-overlay", "#model-info-overlay"]
+}
