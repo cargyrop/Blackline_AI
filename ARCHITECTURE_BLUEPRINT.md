@@ -57,7 +57,7 @@ Blackline_AI/
 │       ├── strings.js        ← prettyModelName, escHtml, etc.
 │       └── paths.js          ← safeResolve, toPosixPath, joinRelPath
 │
-├── frontend/                 ← All frontend logic (replaces public/)
+├── frontend/                 ← All frontend logic (replaces frontend/)
 │   ├── manifest.json         ← Frontend architecture map: modules, dependencies, DOM contracts
 │   ├── index.html            ← Shell only: no inline event handlers, no inline scripts
 │   ├── styles.css            ← Global variables + layout shell only
@@ -111,7 +111,7 @@ Blackline_AI/
 │   ├── INVARIANTS.md         ← Things that must NEVER change (e.g., "safeResolve must block .. traversal")
 │   └── EVOLVE_PROTOCOL.md    ← How the evolve system works: prompt format, plan schema, patch rules
 │
-└── public/                   ← (kept for Express static serving, but all source lives in frontend/)
+└── frontend/                   ← (kept for Express static serving, but all source lives in frontend/)
     ├── (compiled/bundled output if we ever add a build step)
     └── vendor/
         ├── marked.min.js
@@ -276,7 +276,7 @@ These are the "laws of the codebase." The AI is reminded of them in every evolve
 - Largest backend file: `evolveEngine.js` (410 lines). Original monolith was 1,591 lines.
 
 **Phase 2 — COMPLETE ✅**
-- `public/modules/` directory created with 16 focused frontend modules.
+- `frontend/modules/` directory created with 16 focused frontend modules.
 - Original `app.js` (2,011 lines) split into: `state.js`, `core.js`, `toast.js`, `markdown.js`, `panels.js`, `models.js`, `settings.js`, `conversations.js`, `chat_render.js`, `chat_send.js`, `chat_actions.js`, `evolve_tree.js`, `evolve_messages.js`, `evolve_plan.js`, `evolve_send.js`, `data.js`.
 - New `app.js` is a 67-line bootstrap that only loads modules and runs `DOMContentLoaded` initialization.
 - `index.html` updated to load all modules in dependency order before the bootstrap.
@@ -286,9 +286,9 @@ These are the "laws of the codebase." The AI is reminded of them in every evolve
 **Phase 3 — COMPLETE ✅**
 - `contracts/` directory created with architecture docs: `ARCHITECTURE.md`, `INVARIANTS.md`, `EVOLVE_PROTOCOL.md`, `DATA_FLOW.md`.
 - `backend/manifest.json` — machine-readable map of all 18 backend modules with paths, exports, dependencies, line counts.
-- `public/modules/frontend-manifest.json` — machine-readable map of all 16 frontend modules with paths, exports, dependencies, DOM targets, line counts.
+- `frontend/modules/frontend-manifest.json` — machine-readable map of all 16 frontend modules with paths, exports, dependencies, DOM targets, line counts.
 - Every backend module has a `contract.md` co-located: `backend/config/contract.md`, `backend/middleware/contract.md`, `backend/providers/contract.md`, `backend/utils/contract.md`, `backend/services/contract.md`, `backend/services/contract-*.md`, `backend/routes/contract-*.md`.
-- Every frontend module has a `contract.md` in `public/modules/contracts/`: 16 files covering API, DOM targets, invariants, dependencies.
+- Every frontend module has a `contract.md` in `frontend/modules/contracts/`: 16 files covering API, DOM targets, invariants, dependencies.
 - Total contract documentation: ~15,000 words across 35 files.
 - The AI can now understand the entire architecture by reading 2KB of manifest JSON + specific module contracts, without reading any source code.
 
@@ -309,9 +309,9 @@ These are the "laws of the codebase." The AI is reminded of them in every evolve
   - `create` prompts get the manifest + target files (~200-500 lines instead of 2000+)
   - `edit` prompts get only the target file content (~100-400 lines)
   - Estimated context reduction: 60-70% for typical single-file edits
-- `public/modules/evolve_send.js` updated: `EVOLVE_SYSTEM_PROMPT` added (was lost in Phase 2 extraction) with smart file loading instructions. The AI is now told to read manifests, then only request files it needs to edit.
+- `frontend/modules/evolve_send.js` updated: `EVOLVE_SYSTEM_PROMPT` added (was lost in Phase 2 extraction) with smart file loading instructions. The AI is now told to read manifests, then only request files it needs to edit.
 - `backend/services/modelDiscovery.js` updated: Ollama discovery timeout increased from 1.5s to 5s (cold Ollama servers need more time).
-- `public/modules/models.js` updated: `isModelSelectable` now trusts local Ollama models immediately (no probe required for chat selectability). Probes still run for metadata, but models appear in the dropdown right away.
+- `frontend/modules/models.js` updated: `isModelSelectable` now trusts local Ollama models immediately (no probe required for chat selectability). Probes still run for metadata, but models appear in the dropdown right away.
 - **Bugs fixed during this phase**:
   - `EVOLVE_SYSTEM_PROMPT` was lost during Phase 2 extraction (it was a global constant between function declarations, not inside any function). Restored in `evolve_send.js`.
   - `MAX_CONVERSATIONS` was lost during Phase 2 extraction. Restored in `conversations.js`.
@@ -368,6 +368,6 @@ If you do nothing else, do this **today**:
 1. Keep your current monolithic code working.
 2. Create a `contracts/` folder with `ARCHITECTURE.md` and `INVARIANTS.md`.
 3. Update your Evolve prompt to include: **"Before writing code, analyze the architecture in contracts/ARCHITECTURE.md. Only request the files you need to edit. Respect all invariants in contracts/INVARIANTS.md."**
-4. Update the `/api/evolve/execute` endpoint to accept an optional `files` array in the plan: `{"path":"public/app.js","action":"edit",...}` can be replaced with `{"module":"chat","action":"edit",...}` which the server resolves via the manifest.
+4. Update the `/api/evolve/execute` endpoint to accept an optional `files` array in the plan: `{"path":"frontend/app.js","action":"edit",...}` can be replaced with `{"module":"chat","action":"edit",...}` which the server resolves via the manifest.
 
 This alone will cut your AI context usage by 60–70% and make the AI's reasoning much sharper.

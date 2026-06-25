@@ -1,0 +1,26 @@
+body {
+	font-family: Arial, sans-serif;
+	margin: 0;
+	background-color: #f4f4f9;
+	padding: 20px;
+}
+#chat-container {
+	max-width: 600px;
+	margin: auto;
+	border-radius: 8px;
+	box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+	padding: 20px;
+}
+.chat-message {
+	background-color: #fff;
+	margin-bottom: 15px;
+	padding: 10px;
+	border-radius: 8px;
+	word-wrap: break-word;
+}
+.user-message {
+	text-align: right;
+}
+.ai-message {
+	text-align: left;
+}

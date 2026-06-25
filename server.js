@@ -18,7 +18,7 @@ app.use(cors({
 app.use(securityHeaders);
 app.use(rateLimiter(60000, 90));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public'), {
+app.use(express.static(path.join(__dirname, 'frontend'), {
   etag: true,
   lastModified: true,
   maxAge: '1h',
